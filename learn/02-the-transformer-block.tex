@@ -99,13 +99,29 @@ This class will go into \code{src/model.py} in Document~04. For now, understand 
 class LayerNorm(nn.Module):
     def __init__(self, n_embd, bias=False, eps=1e-5):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(n_embd))
-        self.bias = nn.Parameter(torch.zeros(n_embd)) if bias else None
+        self.weight = nn.Parameter(torch.ones(n_embd))    # gamma
+        self.bias = nn.Parameter(torch.zeros(n_embd)) if bias else None  # beta
         self.eps = eps
 
     def forward(self, x):
-        return F.layer_norm(x, self.weight.shape, self.weight, self.bias, self.eps)
+        # mean and variance over the last (feature) dimension
+        mu = x.mean(dim=-1, keepdim=True)           # (B, T, 1)
+        sigma_sq = x.var(dim=-1, keepdim=True,
+                         unbiased=False)             # (B, T, 1)
+
+        # normalize to zero mean, unit variance
+        x_hat = (x - mu) / torch.sqrt(sigma_sq + self.eps)
+
+        # learnable scale and shift
+        out = self.weight * x_hat
+        if self.bias is not None:
+            out = out + self.bias
+        return out
 \end{lstlisting}
+
+\tip{%
+\textbf{Why \code{unbiased=False}?} The variance formula in the paper divides by $d$, not $d-1$. PyTorch's \code{Tensor.var} uses Bessel's correction ($d-1$) by default. We pass \code{unbiased=False} to get the population variance that matches the LayerNorm definition. \code{F.layer\_norm} does this internally --- now you can see it explicitly.
+}
 
 \section{Pre-Norm vs Post-Norm}
 
@@ -156,9 +172,9 @@ The FFN is a simple two-layer MLP applied to each position:
 
 where $W_1$ has shape $(d_{\text{model}}, d_{\text{ff}})$ with $d_{\text{ff}} = 4 \cdot d_{\text{model}}$, and $W_2$ has shape $(d_{\text{ff}}, d_{\text{model}})$.
 
-\subsection{The 4x expansion}
-
-The FFN temporarily expands to $4 \times d_{\text{model}}$ dimensions. This gives each position a much wider intermediate representation --- more capacity to extract and transform features. The expansion factor 4 is an empirical choice from the original paper that has become standard.
+\tip{%
+\textbf{The 4x expansion.} The FFN temporarily expands to $4 \times d_{\text{model}}$ dimensions. This gives each position a much wider intermediate representation --- more capacity to extract and transform features. The expansion factor 4 is an empirical choice from the original paper that has become standard.
+}
 
 \subsection{Activation function}
 
@@ -170,9 +186,54 @@ The original transformer uses ReLU: $\max(0, x)$. GPT-2 and most modern language
 
 where $\Phi(x)$ is the standard Gaussian CDF. Unlike ReLU, which has a hard cutoff at zero, GELU is smooth everywhere --- negative inputs are dampened rather than zeroed out.
 
+\tip{%
+\textbf{What is $\Phi(x)$?} The standard Gaussian CDF is:
+$\displaystyle\Phi(x) = \frac{1}{2}\left[1 + \mathrm{erf}\!\left(\frac{x}{\sqrt{2}}\right)\right]$
+where $\mathrm{erf}$ is the error function. $\Phi(x)$ gives the probability that a standard normal random variable is $\le x$. It rises smoothly from 0 to 1: $\Phi(-\infty) = 0$, $\Phi(0) = 0.5$, $\Phi(\infty) = 1$. Multiplying by $x$ means large positive inputs pass through nearly unchanged ($\Phi \approx 1$), while large negative inputs are suppressed ($\Phi \approx 0$). In practice, PyTorch's \code{F.gelu} uses a fast tanh-based approximation:
+$\mathrm{GELU}(x) \approx 0.5\,x\!\left[1 + \tanh\!\left(\sqrt{2/\pi}\,(x + 0.044715\,x^3)\right)\right]$.
+}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.75\linewidth,
+    height=6cm,
+    xlabel={$x$},
+    ylabel={$f(x)$},
+    xmin=-4, xmax=4,
+    ymin=-1, ymax=4,
+    axis lines=middle,
+    grid=major,
+    grid style={gray!30},
+    legend pos=north west,
+    legend style={font=\small},
+    samples=200,
+    every axis plot/.append style={thick},
+]
+% ReLU
+\addplot[NavyBlue, dashed, domain=-4:4]
+    {max(0, x)};
+\addlegendentry{ReLU: $\max(0,x)$}
+
+% GELU tanh approximation: 0.5x(1 + tanh(sqrt(2/pi)(x + 0.044715 x^3)))
+% pgf tanh uses degrees, so we use the exponential form:
+% tanh(u) = (e^(2u) - 1) / (e^(2u) + 1)
+\addplot[red, domain=-4:4]
+    {0.5 * x * (1 + (exp(2*0.7978845608*(x+0.044715*x^3)) - 1)
+                   / (exp(2*0.7978845608*(x+0.044715*x^3)) + 1))};
+\addlegendentry{GELU: $x \cdot \Phi(x)$}
+\end{axis}
+\end{tikzpicture}
+\end{center}
+
 \subsection{Why ``position-wise''}
 
 The same weights $W_1$ and $W_2$ are shared across all positions in the sequence. Each position is processed independently --- there is no information flow between positions inside the FFN. It is equivalent to a $1 \times 1$ convolution in CNN terminology.
+
+\tip{%
+\textbf{Shared weights, independent application.}
+If $X$ has shape $(T, d_{\text{model}})$, then $X W_1$ is $(T, d_{\text{model}}) \times (d_{\text{model}}, d_{\text{ff}}) = (T, d_{\text{ff}})$. Each row of $X$ (one position) is multiplied by the same $W_1$. In PyTorch, \code{nn.Linear} broadcasts the matmul across the $T$ dimension automatically --- no loop over positions, and no separate FFN per position. This is why it is called ``position-wise'': one FFN, applied to each position the same way.
+}
 
 \subsection{Implementation}
 
