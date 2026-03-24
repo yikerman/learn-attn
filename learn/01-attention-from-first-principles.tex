@@ -2,6 +2,21 @@
 \begin{document}
 \docheader{Attention from First Principles}{1}
 
+\section{Project Setup}
+
+Before we begin, create the project and install PyTorch:
+
+\shelltag
+\begin{lstlisting}[language=bash]
+mkdir learn-attn && cd learn-attn
+uv init
+uv add torch --index https://download.pytorch.org/whl/cu126
+\end{lstlisting}
+
+This gives you a Python environment with PyTorch and CUDA support. All demo code in Documents 01--03 can be run in a Python REPL (\code{uv run python}). Starting in Document 04, we will create the actual project source files.
+
+\checkpoint{Run \code{uv run python -c "import torch; print(torch.cuda.is\_available())"} --- it should print \code{True}.}
+
 This document derives scaled dot-product attention from the ground up, builds multi-head attention on top of it, and introduces the causal mask needed for language modeling. By the end, every line of \code{CausalSelfAttention} in \code{src/model.py} should make sense.
 
 \bigskip\hrule\bigskip
@@ -46,6 +61,7 @@ The dot product $\mathbf{q} \cdot \mathbf{k}$ measures how well the query at one
 
 \textbf{Concrete example.} Suppose we have 3 positions with query and key vectors in $\mathbb{R}^4$:
 
+\demotag
 \begin{lstlisting}
 import torch
 
@@ -67,6 +83,7 @@ print(scores)
 
 Output:
 
+\outputtag
 \begin{lstlisting}
 tensor([[2., 0., 1.],
         [0., 2., 1.],
@@ -98,6 +115,7 @@ Why does this matter? Consider what softmax does with large inputs. If one score
 
 The fix is to divide by $\sqrt{d_k}$ before applying softmax, normalizing the scores back to unit variance:
 
+\demotag
 \begin{lstlisting}
 import math
 
@@ -127,6 +145,7 @@ Properties:
 
 In code:
 
+\demotag
 \begin{lstlisting}
 import torch.nn.functional as F
 
@@ -169,6 +188,9 @@ The output has shape $(T, d_v)$. Each row $i$ of the output is a weighted averag
 
 \textbf{Complete implementation:}
 
+This standalone function shows the algorithm. Our project uses PyTorch's fused \code{F.scaled\_dot\_product\_attention} instead.
+
+\demotag
 \begin{lstlisting}
 import math
 import torch
@@ -227,9 +249,12 @@ Each head operates in a $d_k$-dimensional subspace. Head 1 might learn to attend
 
 \textbf{The efficient implementation trick.} Naively, $h$ heads require $3h$ separate matrix multiplications for the projections. We can do it with just one by concatenating all the projection matrices:
 
+The following snippets show how multi-head attention works step by step inside \code{CausalSelfAttention} in \code{src/model.py}, which we will create in Document~04.
+
 \begin{enumerate}
   \item \textbf{Single combined projection.} Multiply $X$ by a single weight matrix $W_{qkv}$ of shape $(d_{\text{model}}, 3 \cdot d_{\text{model}})$ to produce all $Q, K, V$ for all heads at once:
 
+\concepttag
 \begin{lstlisting}
 qkv = self.c_attn(x)  # (B, T, 3 * d_model)
 \end{lstlisting}
@@ -277,6 +302,9 @@ Everything so far describes \textbf{bidirectional} attention: every position can
 
 The solution is a \textbf{causal mask}: a lower-triangular matrix of ones.
 
+Causal mask pattern:
+
+\outputtag
 \begin{lstlisting}[language={}]
 1 0 0 0
 1 1 0 0
@@ -288,6 +316,7 @@ Row $t$ has ones in columns 0 through $t$ and zeros elsewhere. Position 0 can on
 
 We apply this mask to the attention scores \textbf{before} softmax. Where the mask is 0 (future positions), we set the score to $-\infty$:
 
+\demotag
 \begin{lstlisting}
 mask = torch.tril(torch.ones(T, T))  # lower-triangular
 scores = scores.masked_fill(mask == 0, float('-inf'))
@@ -297,6 +326,7 @@ scores = scores.masked_fill(mask == 0, float('-inf'))
 
 After masking and softmax, the weight matrix looks like:
 
+\outputtag
 \begin{lstlisting}[language={}]
 [1.00  0.00  0.00  0.00]
 [0.45  0.55  0.00  0.00]
@@ -308,6 +338,9 @@ Each row sums to 1, and all entries above the diagonal are exactly 0. Every posi
 
 In \code{src/model.py}, we do not construct the mask manually. Instead, we pass \code{is\_causal=True} to PyTorch's \code{F.scaled\_dot\_product\_attention}:
 
+This is how it appears in the final \code{src/model.py}.
+
+\concepttag
 \begin{lstlisting}
 y = F.scaled_dot_product_attention(
     q, k, v,

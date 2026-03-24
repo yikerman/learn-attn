@@ -84,6 +84,8 @@ Beyond removing cross-attention, GPT introduces several modifications that are n
 
 The original paper uses fixed sinusoidal positional encodings --- the position signal is computed from a formula and added to the token embeddings. GPT replaces this with a learned positional embedding: a plain \code{nn.Embedding} table with one vector per position.
 
+\concepttag
+{\small\itshape This line appears inside \code{BabyGPT.\_\_init\_\_} in \code{src/model.py}.}
 \begin{lstlisting}
 # Sinusoidal (original paper): computed from a formula, not learned
 # Learned (GPT): just another embedding table
@@ -106,6 +108,7 @@ where $\Phi(x)$ is the CDF of the standard normal distribution. In practice, thi
 
 The key difference from ReLU: GELU is smooth everywhere (no sharp corner at zero) and it does not hard-zero negative inputs. Small negative values get a small negative output rather than exactly zero. This means gradients flow more smoothly through the network.
 
+\concepttag
 \begin{lstlisting}
 # In our FeedForward module:
 x = F.gelu(x)  # replaces F.relu(x)
@@ -115,6 +118,8 @@ x = F.gelu(x)  # replaces F.relu(x)
 
 The original paper applies LayerNorm after the residual addition (post-norm):
 
+\concepttag
+{\small\itshape Not used in our project --- shown for comparison.}
 \begin{lstlisting}
 # Post-norm (original paper)
 x = layer_norm(x + sublayer(x))
@@ -122,6 +127,8 @@ x = layer_norm(x + sublayer(x))
 
 GPT applies LayerNorm before the sublayer (pre-norm):
 
+\concepttag
+{\small\itshape This is what our project uses.}
 \begin{lstlisting}
 # Pre-norm (GPT)
 x = x + sublayer(layer_norm(x))
@@ -131,6 +138,8 @@ Why this matters: in post-norm, the residual path passes through the normalizati
 
 Our \code{TransformerBlock} in \code{src/model.py} uses pre-norm:
 
+\concepttag
+{\small\itshape From \code{TransformerBlock} in \code{src/model.py}.}
 \begin{lstlisting}
 def forward(self, x: torch.Tensor) -> torch.Tensor:
     x = x + self.attn(self.ln_1(x))   # pre-norm attention
@@ -144,6 +153,8 @@ The token embedding matrix \code{wte} has shape \code{(vocab\_size, n\_embd)} --
 
 Weight tying forces them to share the same weight matrix:
 
+\concepttag
+{\small\itshape From \code{BabyGPT.\_\_init\_\_} in \code{src/model.py}.}
 \begin{lstlisting}
 # In BabyGPT.__init__:
 self.transformer.wte.weight = self.lm_head.weight
@@ -202,6 +213,8 @@ The model is organized as a \code{ModuleDict} called \code{transformer} plus a s
 
 \subsection{Forward Pass}
 
+\concepttag
+{\small\itshape From \code{BabyGPT.forward} in \code{src/model.py}.}
 \begin{lstlisting}
 def forward(self, idx, targets=None):
     B, T = idx.shape
@@ -281,18 +294,24 @@ Random initialization matters more than you might expect. If initial weights are
 
 \textbf{Standard weights:} All weight matrices and embeddings are initialized from a normal distribution with mean 0 and standard deviation 0.02:
 
+\concepttag
+{\small\itshape From \code{BabyGPT.\_\_init\_\_} and \code{BabyGPT.\_init\_weights} in \code{src/model.py}.}
 \begin{lstlisting}
 nn.init.normal_(module.weight, mean=0.0, std=0.02)
 \end{lstlisting}
 
 \textbf{Biases:} Initialized to zero (though our model has \code{bias=False}, so this only applies if you enable biases):
 
+\concepttag
+{\small\itshape From \code{BabyGPT.\_\_init\_\_} and \code{BabyGPT.\_init\_weights} in \code{src/model.py}.}
 \begin{lstlisting}
 nn.init.zeros_(module.bias)
 \end{lstlisting}
 
 \textbf{Residual projection scaling:} The output projection (\code{c\_proj}) in both the attention and feed-forward sublayers receives special treatment. These are the projections whose outputs get added back via the residual connection.
 
+\concepttag
+{\small\itshape From \code{BabyGPT.\_\_init\_\_} and \code{BabyGPT.\_init\_weights} in \code{src/model.py}.}
 \begin{lstlisting}
 for pn, p in self.named_parameters():
     if pn.endswith("c_proj.weight"):
@@ -306,5 +325,59 @@ Why this is necessary: consider what happens at initialization. Each transformer
 Scaling the residual branch outputs by $1/\sqrt{2N}$ reduces their variance by a factor of $2N$, so the total variance contribution from all residual additions is approximately $2N \cdot \sigma^2 / (2N) = \sigma^2$. The residual stream's variance stays bounded regardless of depth.
 
 For our model with $N = 6$: the scaling factor is $0.02 / \sqrt{12} \approx 0.00577$. This is the GPT-2 initialization convention.
+
+\section{Building the Model}
+
+We now have everything we need to write the model code. Create two files:
+
+\subsection{Step 1: Configuration}
+
+\filetag{src/config.py}
+\begin{lstlisting}
+from dataclasses import dataclass
+
+@dataclass
+class GPTConfig:
+    block_size: int = 256
+    vocab_size: int = 65
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
+    dropout: float = 0.2
+    bias: bool = False
+\end{lstlisting}
+
+\subsection{Step 2: The Model}
+
+Create \code{src/model.py} containing all the classes we have discussed: \code{LayerNorm}, \code{CausalSelfAttention}, \code{FeedForward}, \code{TransformerBlock}, and \code{BabyGPT}. The full file is in the project repository. Here is a summary of what goes in:
+
+\filetag{src/model.py}
+\begin{lstlisting}
+# See the project's src/model.py for the complete implementation.
+# It contains, in order:
+#   - LayerNorm          (Document 02)
+#   - CausalSelfAttention (Document 01, Section 6-7)
+#   - FeedForward        (Document 02, Section 4)
+#   - TransformerBlock   (Document 02, Section 5)
+#   - BabyGPT            (this document, "Our BabyGPT Architecture")
+\end{lstlisting}
+
+\subsection{Step 3: Verify}
+
+\shelltag
+\begin{lstlisting}[language=bash]
+uv run python -c "
+from src.config import GPTConfig
+from src.model import BabyGPT
+import torch
+model = BabyGPT(GPTConfig())
+print(f'Parameters: {model.count_parameters():,}')
+x = torch.randint(0, 65, (2, 256))
+logits, loss = model(x, torch.randint(0, 65, (2, 256)))
+print(f'Logits: {logits.shape}, Loss: {loss.item():.2f}')
+"
+\end{lstlisting}
+
+\checkpoint{You should see \texttt{Parameters: 10,720,128} and a loss near 4.17 (which is $\ln(65)$, the random baseline for 65-class classification).}
 
 \end{document}

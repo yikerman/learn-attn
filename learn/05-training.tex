@@ -10,6 +10,7 @@ Before the model can process text, we need to convert characters to integers. Ti
 
 Our tokenizer (in \code{src/tokenizer.py}) is the simplest possible: sort the unique characters, assign each an integer index, and store two lookup dictionaries.
 
+\filetag{src/tokenizer.py}
 \begin{lstlisting}
 class CharTokenizer:
     def __init__(self, text: str):
@@ -51,8 +52,11 @@ We use character-level tokenization because it makes the full pipeline transpare
 
 The data pipeline is in \code{src/dataset.py}. The key steps:
 
+{\small\itshape These snippets show the logic inside \code{src/dataset.py}, which you should create next.}
+
 \textbf{1. Load and encode.} Download the TinyShakespeare text file, encode all characters to integers, and store the result as a single long tensor.
 
+\concepttag
 \begin{lstlisting}
 text = download_data()                                       # ~1.1M characters
 tokenizer = CharTokenizer(text)
@@ -61,6 +65,7 @@ data = torch.tensor(tokenizer.encode(text), dtype=torch.long)  # shape: (1115394
 
 \textbf{2. Train/val split.} The first 90\% of the data is training, the last 10\% is validation. We split sequentially (not randomly) because the data is a continuous text --- random splitting would leak context across the boundary.
 
+\concepttag
 \begin{lstlisting}
 split = int(0.9 * len(data))
 train_data = data[:split]   # ~1,003,854 tokens
@@ -69,6 +74,7 @@ val_data = data[split:]     # ~111,540 tokens
 
 \textbf{3. Create training examples.} Each training example is a contiguous slice of \code{block\_size + 1 = 257} tokens. The input \code{x} is the first 256 tokens; the target \code{y} is the same window shifted right by one:
 
+\concepttag
 \begin{lstlisting}
 def __getitem__(self, idx):
     chunk = self.data[idx : idx + self.block_size + 1]  # 257 tokens
@@ -81,6 +87,7 @@ Every position in \code{x} provides a training example. Position 0 must predict 
 
 \textbf{4. DataLoader.} Standard PyTorch DataLoader wraps the dataset:
 
+\concepttag
 \begin{lstlisting}
 train_loader = DataLoader(
     train_dataset,
@@ -92,6 +99,17 @@ train_loader = DataLoader(
 \end{lstlisting}
 
 Each batch contains 64 sequences of length 256, giving $64 \times 256 = 16{,}384$ tokens per batch.
+
+\subsection{Creating the Data Pipeline}
+
+Create \code{src/tokenizer.py} with the \code{CharTokenizer} class shown above, and \code{src/dataset.py} with the download, dataset, and dataloader logic. The full implementations are in the project repository.
+
+\shelltag
+\begin{lstlisting}[language=bash]
+uv run python -m src.dataset
+\end{lstlisting}
+
+\checkpoint{You should see: \texttt{Characters: 1,115,394}, \texttt{Vocab size: 65}, \texttt{Train tokens: 1,003,854}, \texttt{Val tokens: 111,540}.}
 
 \section{The Optimizer: AdamW}
 
@@ -155,6 +173,8 @@ Not all parameters should be decayed. Weight matrices benefit from decay --- it 
 
 Our \code{configure\_optimizer} function in \code{src/train.py} separates parameters into two groups:
 
+\concepttag
+{\small\itshape From \code{configure\_optimizer} in \code{src/train.py}.}
 \begin{lstlisting}
 for name, param in model.named_parameters():
     if param.dim() < 2:       # biases, LayerNorm weights (1D tensors)
@@ -217,6 +237,8 @@ The original ``Attention Is All You Need'' paper uses a different schedule: $\te
 
 Here is the implementation from \code{src/train.py}:
 
+\concepttag
+{\small\itshape From \code{get\_lr} in \code{src/train.py}.}
 \begin{lstlisting}
 def get_lr(step: int) -> float:
     # Linear warmup
@@ -233,6 +255,8 @@ def get_lr(step: int) -> float:
 
 The learning rate is set manually at each step by writing to the optimizer's parameter groups:
 
+\concepttag
+{\small\itshape From \code{get\_lr} in \code{src/train.py}.}
 \begin{lstlisting}
 lr = get_lr(step)
 for param_group in optimizer.param_groups:
@@ -243,6 +267,8 @@ for param_group in optimizer.param_groups:
 
 The training loop in \code{src/train.py} follows the standard PyTorch pattern, with mixed precision and gradient clipping. Here is the core of the loop, annotated step by step:
 
+\concepttag
+{\small\itshape From the main training loop in \code{src/train.py}.}
 \begin{lstlisting}
 for step in range(max_iters):
     # 1. Set learning rate for this step
@@ -292,6 +318,8 @@ The \code{torch.amp.autocast} context manager automatically casts operations to 
 
 \subsection{Gradient Clipping}
 
+\concepttag
+{\small\itshape From the main training loop in \code{src/train.py}.}
 \begin{lstlisting}
 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 \end{lstlisting}
@@ -308,6 +336,8 @@ Note: \code{scaler.unscale\_()} must be called before gradient clipping. Otherwi
 
 \subsection{Clearing Gradients}
 
+\concepttag
+{\small\itshape From the main training loop in \code{src/train.py}.}
 \begin{lstlisting}
 optimizer.zero_grad(set_to_none=True)
 \end{lstlisting}
@@ -318,6 +348,8 @@ PyTorch accumulates gradients by default --- calling \code{.backward()} adds to 
 
 Every 250 steps, the training loop evaluates the model on both training and validation data by averaging the loss over 200 batches:
 
+\concepttag
+{\small\itshape From the main training loop in \code{src/train.py}.}
 \begin{lstlisting}
 @torch.no_grad()
 def estimate_loss(model, train_loader, val_loader, device, eval_iters=200):
@@ -333,6 +365,8 @@ def estimate_loss(model, train_loader, val_loader, device, eval_iters=200):
 
 When the validation loss improves, the model state is saved:
 
+\concepttag
+{\small\itshape From the main training loop in \code{src/train.py}.}
 \begin{lstlisting}
 checkpoint = {
     "model": model.state_dict(),
@@ -345,6 +379,17 @@ torch.save(checkpoint, CHECKPOINT_DIR / "best.pt")
 \end{lstlisting}
 
 The checkpoint includes everything needed to reconstruct the model: the weights, the architecture config, and the vocabulary mapping. This is what \code{src/generate.py} loads to produce text.
+
+\subsection{Running Training}
+
+Create \code{src/train.py} with the optimizer setup, learning rate schedule, and training loop described above. The full implementation is in the project repository.
+
+\shelltag
+\begin{lstlisting}[language=bash]
+uv run python -m src.train
+\end{lstlisting}
+
+\checkpoint{Training takes about 3--5 minutes on an RTX 3080. You should see the loss drop from $\sim$4.17 to a best validation loss around 1.3--1.5. The best checkpoint is saved to \code{checkpoints/best.pt}.}
 
 \section{Hyperparameters Summary}
 

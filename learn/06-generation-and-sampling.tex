@@ -21,6 +21,8 @@ This is inherently sequential. Each new token depends on all previous tokens (th
 
 When the sequence grows beyond \code{block\_size} (256 in our model), we crop from the left:
 
+\concepttag
+{\small\itshape From \code{BabyGPT.generate} in \code{src/model.py}.}
 \begin{lstlisting}
 idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
 \end{lstlisting}
@@ -38,6 +40,7 @@ Two settings matter during generation:
 
 The simplest strategy: always pick the token with the highest probability.
 
+\concepttag
 \begin{lstlisting}
 next_token = logits.argmax(dim=-1)
 \end{lstlisting}
@@ -64,6 +67,8 @@ The effect depends on $T$:
 
 \textbf{$T < 1.0$} (but above 0): The distribution becomes sharper than the model's default. High-probability tokens become even more dominant, low-probability tokens become even less likely. This produces more conservative, predictable text.
 
+\concepttag
+{\small\itshape From \code{BabyGPT.generate} in \code{src/model.py}.}
 \begin{lstlisting}
 # In our generate() method:
 logits = logits[:, -1, :] / temperature  # scale before softmax
@@ -79,6 +84,8 @@ Temperature controls the shape of the distribution, but it does not eliminate th
 
 Top-k sampling fixes this by restricting the sample to the $k$ most probable tokens. All other tokens are set to $-\infty$ before softmax, which gives them zero probability.
 
+\concepttag
+{\small\itshape From \code{BabyGPT.generate} in \code{src/model.py}.}
 \begin{lstlisting}
 if top_k is not None:
     v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
@@ -128,6 +135,8 @@ The complete generation pipeline is split across two files:
 
 \textbf{\code{src/model.py}} contains the \code{generate()} method on the model class:
 
+\concepttag
+{\small\itshape This method is already in \code{src/model.py} (created in Document~04).}
 \begin{lstlisting}
 @torch.no_grad()
 def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
@@ -160,9 +169,21 @@ def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
   \item Decode the full sequence (prompt + generated tokens) back to a string.
 \end{enumerate}
 
+\shelltag
 \begin{lstlisting}[language=bash]
 uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8 --top-k 40
 \end{lstlisting}
+
+\subsection{Creating the Generation Script}
+
+Create \code{src/generate.py} --- a CLI wrapper that loads a checkpoint, encodes the prompt, calls \code{model.generate()}, and prints the result. The full implementation is in the project repository.
+
+\shelltag
+\begin{lstlisting}[language=bash]
+uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8
+\end{lstlisting}
+
+\checkpoint{You should see several lines of Shakespeare-like text with correct dialogue formatting (character names in caps followed by colons) and quasi-Elizabethan vocabulary. Try different temperatures: 0.5 for conservative output, 1.2 for more creative.}
 
 \section{Example Outputs}
 
@@ -209,5 +230,30 @@ These are exactly the insights behind the GPT scaling papers. The architecture w
 \bigskip
 
 This concludes the six-document series. The full pipeline --- from the attention mechanism to a trained, generating language model --- is implemented in \code{src/} and explained in \code{learn/}.
+
+\section{Project Summary}
+
+At this point your project directory should contain:
+
+\begin{verbatim}
+learn-attn/
+  pyproject.toml
+  src/
+    __init__.py
+    config.py       (Document 04)
+    model.py        (Document 04)
+    tokenizer.py    (Document 05)
+    dataset.py      (Document 05)
+    train.py        (Document 05)
+    generate.py     (Document 06)
+  data/
+    tinyshakespeare.txt  (downloaded by src/dataset.py)
+  checkpoints/
+    best.pt         (saved by src/train.py)
+  learn/
+    01-06 .tex/.pdf (these documents)
+\end{verbatim}
+
+The model is 10.7M parameters, trained on 1MB of Shakespeare, generating character-level text. The same architecture --- with more parameters, subword tokenization, and more data --- is what powers GPT-2, GPT-3, and their successors.
 
 \end{document}

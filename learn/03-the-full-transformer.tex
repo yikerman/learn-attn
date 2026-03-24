@@ -98,6 +98,7 @@ This cross-attention mechanism is conceptually the same as Bahdanau attention fr
 
 \textbf{Token embeddings} are a learned lookup table that maps each token ID (an integer) to a dense vector of size $d_{\text{model}}$:
 
+\concepttag
 \begin{lstlisting}
 embedding = nn.Embedding(vocab_size, d_model)
 # Input: (B, T) tensor of integer token IDs
@@ -145,6 +146,8 @@ where $M_k$ is a rotation matrix that depends only on $k$, not on $pos$. This me
 
 A PyTorch implementation of sinusoidal positional encoding:
 
+\demotag
+{\small\itshape This function is not part of our project --- our GPT uses learned positional embeddings instead. Try it to visualize the encoding patterns.}
 \begin{lstlisting}
 import torch
 import math
@@ -179,6 +182,7 @@ After the stack of 6 decoder layers, we need to convert the decoder's output vec
   \item \textbf{Softmax} converts these logits into a probability distribution.
 \end{enumerate}
 
+\concepttag
 \begin{lstlisting}
 # After decoder stack:
 logits = linear(decoder_output)  # (B, T_tgt, vocab_size)

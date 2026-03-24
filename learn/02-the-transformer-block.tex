@@ -34,6 +34,7 @@ The identity matrix $I$ guarantees that even if $\partial F / \partial x$ is ver
 
 In code, a residual connection is one line:
 
+\concepttag
 \begin{lstlisting}
 x = x + sublayer(x)
 \end{lstlisting}
@@ -91,6 +92,9 @@ The normalization centers and scales each position's feature vector to zero mean
 
 Following modern convention (GPT-J, LLaMA), we default to \code{bias=False}:
 
+This class will go into \code{src/model.py} in Document~04. For now, understand the structure.
+
+\concepttag
 \begin{lstlisting}
 class LayerNorm(nn.Module):
     def __init__(self, n_embd, bias=False, eps=1e-5):
@@ -172,6 +176,9 @@ The same weights $W_1$ and $W_2$ are shared across all positions in the sequence
 
 \subsection{Implementation}
 
+This class will go into \code{src/model.py} in Document~04. For now, understand the structure.
+
+\concepttag
 \begin{lstlisting}
 class FeedForward(nn.Module):
     def __init__(self, config):
@@ -202,6 +209,9 @@ The two sublayers serve complementary roles:
 
 \subsection{Implementation}
 
+This class will go into \code{src/model.py} in Document~04. For now, understand the structure.
+
+\concepttag
 \begin{lstlisting}
 class TransformerBlock(nn.Module):
     def __init__(self, config):
@@ -223,6 +233,9 @@ A transformer model is $N$ identical blocks applied in sequence. In our BabyGPT,
 
 After the last block, a final LayerNorm is applied:
 
+Preview of the forward pass in \code{BabyGPT}, which we build in Document~04.
+
+\concepttag
 \begin{lstlisting}
 x = tok_emb + pos_emb
 for block in self.blocks:

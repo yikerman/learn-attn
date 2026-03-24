@@ -13,6 +13,7 @@
 \usepackage{parskip}
 \usepackage[dvipsnames]{xcolor}
 \usepackage{listings}
+\usepackage{courier}
 \usepackage[colorlinks=true, linkcolor=NavyBlue, urlcolor=NavyBlue, citecolor=NavyBlue]{hyperref}
 
 % Code listing style
@@ -54,4 +55,52 @@
     {\itshape Document #2 of 6\,---\,Building a GPT from Scratch}
   \end{center}
   \vspace{1em}
+}
+
+% --- Code block annotations ---
+% Small colored tags placed before a listing to clarify its role.
+
+% Code that the reader should put into a project file.
+% Usage: \filetag{src/model.py}  (before \begin{lstlisting})
+\newcommand{\filetag}[1]{%
+  \par\noindent
+  \colorbox{black!8}{\small\sffamily\bfseries File: \code{#1}}%
+  \nopagebreak\par\nopagebreak\vspace{-0.6em}%
+}
+
+% Standalone demo — try in a Python REPL or scratch script, not part of the project.
+\newcommand{\demotag}{%
+  \par\noindent
+  \colorbox{NavyBlue!12}{\small\sffamily\bfseries Demo \textnormal{--- try in a REPL, not part of the project}}%
+  \nopagebreak\par\nopagebreak\vspace{-0.6em}%
+}
+
+% Pseudocode or conceptual snippet illustrating an idea.
+\newcommand{\concepttag}{%
+  \par\noindent
+  \colorbox{black!6}{\small\sffamily\bfseries Conceptual \textnormal{--- illustrating the idea, not runnable as-is}}%
+  \nopagebreak\par\nopagebreak\vspace{-0.6em}%
+}
+
+% Expected terminal or REPL output.
+\newcommand{\outputtag}{%
+  \par\noindent
+  \colorbox{black!6}{\small\sffamily\bfseries Expected output}%
+  \nopagebreak\par\nopagebreak\vspace{-0.6em}%
+}
+
+% Shell command the reader should run.
+% Usage: \shelltag  (before a listing with language=bash or similar)
+\newcommand{\shelltag}{%
+  \par\noindent
+  \colorbox{Goldenrod!20}{\small\sffamily\bfseries Shell \textnormal{--- run in your terminal}}%
+  \nopagebreak\par\nopagebreak\vspace{-0.6em}%
+}
+
+% Verification checkpoint — run this and compare.
+\newcommand{\checkpoint}[1]{%
+  \medskip\par\noindent
+  \fbox{\parbox{\dimexpr\linewidth-2\fboxsep-2\fboxrule}{%
+    {\sffamily\bfseries Checkpoint:} #1}}%
+  \medskip
 }
