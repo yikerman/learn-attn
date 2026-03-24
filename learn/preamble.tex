@@ -1,0 +1,57 @@
+% Shared preamble for learn-attn documents
+% Usage: \input{preamble} at the top of each document
+
+\documentclass[11pt, a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{parskip}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{listings}
+\usepackage[colorlinks=true, linkcolor=NavyBlue, urlcolor=NavyBlue, citecolor=NavyBlue]{hyperref}
+
+% Code listing style
+\definecolor{codebg}{gray}{0.96}
+\definecolor{codeframe}{gray}{0.8}
+\definecolor{codecomment}{RGB}{90,130,90}
+\definecolor{codestring}{RGB}{160,60,60}
+\definecolor{codekw}{RGB}{40,40,120}
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codeframe},
+  framesep=6pt,
+  xleftmargin=6pt,
+  xrightmargin=6pt,
+  breaklines=true,
+  breakatwhitespace=true,
+  showstringspaces=false,
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecomment}\itshape,
+  stringstyle=\color{codestring},
+  numbers=none,
+  tabsize=4,
+  aboveskip=1em,
+  belowskip=1em,
+  morekeywords={self, None, True, False},
+}
+
+% Inline code
+\newcommand{\code}[1]{\texttt{#1}}
+
+% Document series header
+\newcommand{\docheader}[2]{%
+  \begin{center}
+    {\Large\bfseries #1}\\[6pt]
+    {\itshape Document #2 of 6\,---\,Building a GPT from Scratch}
+  \end{center}
+  \vspace{1em}
+}

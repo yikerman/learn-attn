@@ -1,0 +1,17 @@
+[project]
+name = "learn-attn"
+version = "0.1.0"
+description = "Baby GPT from scratch — an educational transformer implementation"
+requires-python = ">=3.14"
+dependencies = [
+    "torch",
+    "numpy",
+    "requests",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
