@@ -12,9 +12,7 @@ from src.config import GPTConfig
 from src.dataset import get_dataloaders
 from src.model import BabyGPT
 
-# ---------------------------------------------------------------------------
-# Hyperparameters
-# ---------------------------------------------------------------------------
+# ---- Hyperparameters ----
 BATCH_SIZE = 64
 MAX_ITERS = 5000
 EVAL_INTERVAL = 250

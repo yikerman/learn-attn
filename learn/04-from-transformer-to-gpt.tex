@@ -189,6 +189,10 @@ self.transformer.wte.weight = self.lm_head.weight
 
 This means \code{lm\_head} computes logits as a dot product between the hidden state and the token embeddings. A token's logit is high when the hidden state is close to that token's embedding vector. This reduces the parameter count (one less \code{vocab\_size x n\_embd} matrix) and acts as regularization --- the model is encouraged to produce embeddings that are directly useful for prediction.
 
+\tip{%
+\textbf{If \code{lm\_head} shares weights with \code{wte}, how does it predict the \emph{next} token?} The hidden state at position $t$ \emph{starts} as the embedding of $x_t$, but 6 transformer blocks then transform it --- attention mixes in context from positions $0 \ldots t$, and feed-forward layers apply nonlinear transformations. By the time it exits the final LayerNorm, it is no longer ``the embedding of $x_t$.'' The loss function forces the transformer blocks to push that hidden vector \textbf{toward the embedding of $x_{t+1}$}, because the tied head computes $\text{logit}[i] = \text{dot}(\text{hidden}_t,\; \text{embedding}_i)$, and the loss rewards maximizing the logit for the correct next token. Think of the embedding space as a shared room where every character has a fixed address: the transformer blocks move the hidden state from near $x_t$'s address toward $x_{t+1}$'s address, and the tied head asks ``whose address are you closest to now?'' Document~05 covers the loss function in detail.
+}
+
 \subsection{Dropout}
 
 Dropout (Srivastava et al., 2014) is a regularization technique. During training, each activation is independently zeroed out with probability $p$:
@@ -293,6 +297,10 @@ def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
 \end{lstlisting}
 
 The input \code{idx} has shape \code{(B, T)} --- a batch of B sequences, each T tokens long. The output \code{logits} has shape \code{(B, T, 65)} --- a probability distribution over 65 characters at every position. When \code{targets} are provided, cross-entropy loss is computed and returned alongside the logits.
+
+\tip{%
+\textbf{Why does each position predict the \emph{next} token?} The causal mask ensures position $t$ can only attend to tokens $x_0, \ldots, x_t$ --- it cannot see $x_{t+1}$ or beyond. So the hidden vector at position $t$ is a learned summary of the past. The loss function (covered in Document~05) compares position $t$'s output against the target $x_{t+1}$. Gradients flow backward and reshape the model so that each position's representation becomes useful for predicting what comes next --- because that is the only thing the loss ever rewards. The architecture does not force this; training does.
+}
 
 \section{Parameter Count}
 

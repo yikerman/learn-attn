@@ -181,21 +181,31 @@ GPT-2 uses a variant called \textbf{byte-level BPE}. Instead of starting with Un
 \subsubsection{Why we use character-level instead}
 
 \begin{center}
-\begin{tabular}{llll}
+{\small
+\begin{tabular}{lll}
 \toprule
 Property & Character-level & BPE (subword) \\
 \midrule
-Vocab size & 65 & 30,000 -- 50,000 \\
-Sequence length for same text & Long (1 char = 1 token) & Short (\textasciitilde{}4x fewer tokens) \\
-Tokenizer complexity & Two dictionaries & Merge table + encoding algorithm \\
-Information per token & 1 character & Roughly 1 word or word piece \\
+Vocab size & 65 & 30K -- 50K \\
+Sequence length & Long (1 char = 1 token) & Short (\textasciitilde{}4x fewer) \\
+Tokenizer complexity & Two dictionaries & Merge table + algorithm \\
+Info per token & 1 character & \textasciitilde{}1 word or subword \\
 \bottomrule
 \end{tabular}
+}
 \end{center}
 
 BPE produces shorter sequences, which means the model's fixed context window covers more text. It also lets the model reason at word-level granularity rather than character-level. The trade-off is tokenizer complexity and a much larger embedding table.
 
 We use character-level tokenization because it makes the full pipeline transparent. There are no merge rules, no special tokens, no tokenizer artifacts. Every step from raw text to model input is visible.
+
+\subsection{Label Smoothing}
+
+The original ``Attention Is All You Need'' paper trains with \textbf{label smoothing} ($\epsilon = 0.1$). Instead of a hard one-hot target, the correct class gets probability $1 - \epsilon + \epsilon/K$ and every other class gets $\epsilon/K$:
+
+\[\text{target}_i = \begin{cases} 1 - \epsilon + \epsilon / K & \text{if } i = \text{correct class} \\ \epsilon / K & \text{otherwise} \end{cases}\]
+
+This prevents the model from pushing logits toward $\pm\infty$ to achieve a perfect one-hot output. Once the correct token reaches $\sim$90\% probability, there is no further gradient signal --- the model is discouraged from over-fitting to individual training examples. We do not use label smoothing in BabyGPT; at this scale the benefit is minimal, and standard cross-entropy keeps the code simpler.
 
 \section{Building the Dataset}
 
@@ -208,8 +218,9 @@ The data pipeline is in \code{src/dataset.py}. The key steps:
 \shelltag
 \begin{lstlisting}[language=bash]
 mkdir -p data
-wget -O data/tinyshakespeare.txt \
-  https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
+URL=https://raw.githubusercontent.com/karpathy/char-rnn
+URL=$URL/master/data/tinyshakespeare/input.txt
+wget -O data/tinyshakespeare.txt $URL
 \end{lstlisting}
 
 Then read the file, encode all characters to integers, and store the result as a single long tensor.
@@ -281,26 +292,6 @@ The dataset generates examples by \textbf{striding with step size 1}: item 0 sta
 The total number of items is \code{len(data) - block\_size}. For the training split: $1{,}003{,}854 - 256 = 1{,}003{,}598$ overlapping windows. The \code{DataLoader} shuffles these and draws batches of 64.
 
 Every position in \code{x} provides a training signal. Position 0 must predict position 1 (using only token 0 as context). Position 255 must predict position 256 (using all 256 tokens of context). A single \code{(x, y)} pair gives us 256 next-token prediction examples.
-
-\textbf{Inspecting a training sample.} You can decode a sample back to text to see exactly what the model trains on:
-
-\demotag
-\begin{lstlisting}
-text = DATA_FILE.read_text()
-tok = CharTokenizer(text)
-data = torch.tensor(tok.encode(text), dtype=torch.long)
-ds = ShakespeareDataset(data, block_size=256)
-
-x, y = ds[0]                           # first training item
-print("Input: ", tok.decode(x.tolist()[:40]))   # first 40 chars of x
-print("Target:", tok.decode(y.tolist()[:40]))   # first 40 chars of y
-
-# Output:
-# Input:  First Citizen:\nBefore we proceed any
-# Target: irst Citizen:\nBefore we proceed any f
-\end{lstlisting}
-
-The target is the input shifted by one character --- at every position, the model learns to predict the next character.
 
 \textbf{4. DataLoader.} Standard PyTorch DataLoader wraps the dataset:
 
@@ -418,6 +409,39 @@ uv run python -m src.dataset
 \end{lstlisting}
 
 \checkpoint{You should see: \texttt{Characters: 1,115,394}, \texttt{Vocab size: 65}, \texttt{Train tokens: 1,003,854}, \texttt{Val tokens: 111,540}.}
+
+\textbf{Inspecting a training sample.} You can decode a sample back to text to see exactly what the model trains on:
+
+\demotag
+\begin{lstlisting}
+from src.config import GPTConfig
+from src.dataset import get_dataloaders
+
+config = GPTConfig()
+train_loader, val_loader, tok = get_dataloaders(config)
+
+x, y = next(iter(train_loader))          # one batch: (64, 256) each
+print("Input: ", tok.decode(x[0, :40].tolist()))
+print("Target:", tok.decode(y[0, :40].tolist()))
+
+# Output:
+# Input:  First Citizen:\nBefore we proceed any
+# Target: irst Citizen:\nBefore we proceed any f
+\end{lstlisting}
+
+The target is the input shifted by one character --- at every position, the model learns to predict the next character.
+
+\tip{%
+\textbf{Why does a shifted target teach next-token prediction --- and how does weight tying fit in?}
+
+Two architectural constraints make this work. \textbf{(1) The causal mask} ensures position $t$ only attends to tokens $x_0, \ldots, x_t$ --- it cannot see $x_{t+1}$ or beyond. So the hidden vector at position $t$ is a learned summary of the past, not a copy of the future. \textbf{(2) The cross-entropy loss} compares position $t$'s output against the target $x_{t+1}$. Gradients flow backward and reshape the model so that each position's hidden representation becomes useful for predicting what comes next --- because that is the only thing the loss ever rewards.
+
+Now recall that \code{lm\_head} shares weights with \code{wte} (the token embedding matrix, shape $65 \times 384$). The logit for character $i$ at position $t$ is simply:
+\[\text{logit}[t, i] = \text{dot}(\text{hidden}_t,\; \text{embedding}_i)\]
+This is a similarity search: ``which token's embedding is the hidden state closest to?'' The hidden state at position $t$ \emph{starts} as the embedding of $x_t$ (plus the positional embedding), but 6 transformer blocks then transform it --- attention mixes in context from all positions $0 \ldots t$, and feed-forward layers apply nonlinear transformations. By the time the vector exits the final LayerNorm, it is no longer ``the embedding of $x_t$.''
+
+The training loss forces the transformer blocks to push that hidden vector \textbf{toward the embedding of $x_{t+1}$}. Think of the embedding space as a shared room where every character has a fixed address: the transformer blocks move the hidden state from near $x_t$'s address toward $x_{t+1}$'s address, and the tied output head asks ``whose address are you closest to now?'' Weight tying constrains input and output to share the same geometry --- tokens that appear in similar contexts get similar embeddings \emph{and} are predicted in similar contexts. This is a useful inductive bias, not a limitation.
+}
 
 \section{The Optimizer: AdamW}
 
@@ -631,9 +655,7 @@ from src.config import GPTConfig
 from src.dataset import get_dataloaders
 from src.model import BabyGPT
 
-# ---------------------------------------------------------------------------
-# Hyperparameters
-# ---------------------------------------------------------------------------
+# ---- Hyperparameters ----
 BATCH_SIZE = 64
 MAX_ITERS = 5000
 EVAL_INTERVAL = 250
@@ -858,45 +880,27 @@ uv run python -m src.train
 
 Note: our implementation hand-rolls LayerNorm and attention using plain PyTorch operations rather than calling optimized fused kernels (e.g.\ \code{F.scaled\_dot\_product\_attention}, \code{F.layer\_norm}). This is intentional --- seeing the raw matrix operations is the point of this project --- but it means training is slower than an optimized implementation would be. A production codebase using fused kernels and FlashAttention would train the same model significantly faster.}
 
-\section{Hyperparameters Summary}
+\subsection{Hyperparameters Summary}
 
 \begin{center}
-\begin{tabular}{lll}
+{\small
+\begin{tabular}{llp{6.5cm}}
 \toprule
 Parameter & Value & Rationale \\
 \midrule
-\code{batch\_size} & 64 & $64 \times 256 = 16{,}384$ tokens per batch. Fits comfortably in 10GB VRAM. \\
-\code{max\_iters} & 5000 & $5000 \times 16{,}384 \approx 82\text{M}$ tokens seen. Multiple passes over the 1M-token dataset. \\
-\code{learning\_rate} & $1 \times 10^{-3}$ & Relatively high --- small models tolerate larger learning rates. \\
-\code{min\_lr} & $1 \times 10^{-4}$ & 10x below max. The model fine-tunes in the late phase. \\
-\code{warmup\_iters} & 100 & 2\% of training. Enough for moment estimates to stabilize. \\
-\code{weight\_decay} & 0.1 & Standard for transformer training. Prevents weight growth. \\
-\code{grad\_clip} & 1.0 & Standard value. Rarely triggers but prevents catastrophic steps. \\
+\code{batch\_size} & 64 & $64 \times 256 = 16{,}384$ tokens/batch. Fits in 10\,GB VRAM. \\
+\code{max\_iters} & 5000 & $\approx$82M tokens seen. Multiple passes over the dataset. \\
+\code{learning\_rate} & $10^{-3}$ & Relatively high --- small models tolerate larger LRs. \\
+\code{min\_lr} & $10^{-4}$ & 10x below max. Fine-tunes in the late phase. \\
+\code{warmup\_iters} & 100 & 2\% of training. Moment estimates stabilize. \\
+\code{weight\_decay} & 0.1 & Standard for transformers. Prevents weight growth. \\
+\code{grad\_clip} & 1.0 & Rarely triggers but prevents catastrophic steps. \\
 \code{beta1} & 0.9 & Standard momentum coefficient. \\
-\code{beta2} & 0.99 & Slightly faster adaptation than default 0.999. \\
+\code{beta2} & 0.99 & Faster adaptation than default 0.999. \\
 \bottomrule
 \end{tabular}
+}
 \end{center}
-
-\textbf{Expected results:} Validation loss of approximately 1.47 after 5000 iterations. Training time approximately 3--5 minutes on an RTX 3080. The model will produce text that looks like plausible Shakespeare formatting with quasi-Elizabethan words, though it will not be semantically coherent (it is a 10.7M parameter character-level model trained on 1MB of data).
-
-\section{Label Smoothing (Brief Note)}
-
-The original ``Attention Is All You Need'' paper uses label smoothing with $\epsilon = 0.1$. Instead of the standard one-hot target distribution:
-
-\[\text{target} = [0, 0, \ldots, 1, \ldots, 0]\]
-
-label smoothing replaces it with:
-
-\[\text{target}_i = \begin{cases} 1 - \epsilon + \epsilon / K & \text{if } i = \text{correct class} \\ \epsilon / K & \text{otherwise} \end{cases}\]
-
-where $K$ is the number of classes (vocabulary size). For our model with $K = 65$ and $\epsilon = 0.1$: the correct token gets probability $0.9 + 0.1/65 \approx 0.9015$, and each incorrect token gets probability $0.1/65 \approx 0.00154$.
-
-This prevents the model from becoming overconfident. Without label smoothing, the model is incentivized to push logits for the correct token toward $+\infty$ and all others toward $-\infty$. Label smoothing caps the benefit: once the model assigns \textasciitilde{}90\% probability to the correct token, there is no further gradient signal pushing it higher. This can improve generalization by preventing the model from memorizing training examples too precisely.
-
-When label smoothing is used, the loss is typically computed as KL divergence between the smoothed target distribution and the model's output distribution, rather than standard cross-entropy.
-
-We do not use label smoothing in our BabyGPT. At this scale (small model, small dataset), the benefit is minimal, and standard cross-entropy keeps the code simpler.
 
 \bigskip
 

@@ -13,7 +13,7 @@ Character-level language model trained on TinyShakespeare (~1.1M chars, 65 uniqu
 
 ## Tech Stack
 - Python 3.14, managed by uv
-- PyTorch (with CUDA, targeting RTX 3080 10GB)
+- PyTorch (with CUDA, targeting modern NVIDIA GPUs)
 - No other ML frameworks — plain PyTorch only
 
 ## Key Commands
@@ -21,7 +21,7 @@ Character-level language model trained on TinyShakespeare (~1.1M chars, 65 uniqu
 ./build.sh                                                         # rebuild PDFs
 uv sync                                                            # install deps
 uv run python -m src.dataset                                       # download TinyShakespeare + print stats
-uv run python -m src.train                                         # train the model (~3-5 min on RTX 3080)
+uv run python -m src.train                                         # train the model (~14 min on RTX 3080)
 uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8  # generate text
 ```
 
@@ -34,7 +34,7 @@ uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8  # generate te
 - Batch size 64, 5000 iterations, AdamW (lr=1e-3, wd=0.1)
 - Cosine LR schedule with 100-step warmup
 - Mixed precision (float16), gradient clipping at 1.0
-- Expected val loss ~1.47, training time ~3-5 min on RTX 3080
+- Expected val loss ~1.47, training time ~14 min on RTX 3080
 
 ## Architecture Decisions
 - **Pre-norm** (LayerNorm before sublayer) — matches GPT-2 and modern practice
@@ -52,10 +52,11 @@ uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8  # generate te
 
 ## Teaching Assistant Mode
 When the user asks questions while reading `learn/` documents:
-1. Answer the question in conversation.
-2. Record the answer as a **Tip** section inside the relevant `learn/` document, matching the document's existing writing style and tone.
-3. Place the tip near the content that prompted the question so future readers benefit.
-4. Make sure documents' code are sync with `src/`.
+1. Pull ./the-annotated-transformer.txt into context. (It is scraped from the Annotated Transformer website and contains all the text and math formulas.)
+2. Answer the question in conversation.
+3. Record the answer as a **Tip** section inside the relevant `learn/` document, matching the document's existing writing style and tone.
+4. Place the tip near the content that prompted the question so future readers benefit.
+5. Make sure documents' code are sync with `src/`.
 
 ## Document Progression
 1. `01-attention-from-first-principles.md` — scaled dot-product attention, multi-head, masking
@@ -66,9 +67,8 @@ When the user asks questions while reading `learn/` documents:
 6. `06-generation-and-sampling.md` — autoregressive generation, temperature, top-k
 
 ## Dependencies
-- torch (CUDA 12.6 wheels)
+- torch (CUDA wheels)
 - numpy
-- requests (for data download)
 
 ## Common Issues
 - If `uv sync` fails on torch, check that the PyTorch index URL matches your CUDA version
