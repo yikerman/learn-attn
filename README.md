@@ -14,4 +14,7 @@ I cannot take credit for this repository which is based heavily on the work of o
 - The original authors of the paper [Attention is All You Need](https://arxiv.org/abs/1706.03762) and the many researchers who have built on top of it.
 - The authors of the Annotated Transformer. (MIT License)
 - Karpathy's tutorials and his nanoGPT codebase. (MIT License)
-- Anthropic; while it is a greedy company, Claude Opus and Claude Code are amazing tools.
+
+## How is this not AI slop?
+
+I read everthing.
