@@ -76,6 +76,72 @@ output                                   output
 
 That is the entire structural difference. The self-attention and feed-forward sublayers work identically to what we built in Document 02.
 
+Compare the decoder-only architecture to the full encoder-decoder from Document 03 --- the entire left half and the cross-attention sublayer are gone:
+
+\begin{center}
+\begin{tikzpicture}[
+    box/.style={draw, rounded corners=2pt, minimum width=2.8cm, minimum height=0.55cm,
+                align=center, font=\scriptsize\sffamily},
+    attn/.style={box, fill=orange!30},
+    norm/.style={box, fill=yellow!25},
+    ffn/.style={box, fill=blue!15},
+    emb/.style={box, fill=orange!20},
+    head/.style={box, fill=blue!15},
+    lbl/.style={font=\scriptsize\sffamily},
+    arr/.style={->, >=stealth, thick},
+    res/.style={->, >=stealth, thin, gray},
+    every node/.style={inner sep=3pt},
+]
+
+\def\cx{0}  % centre x
+
+% Input label
+\node[lbl] (input) at (\cx, 6.8) {Input Tokens};
+
+% Token Embedding
+\node[emb] (emb) at (\cx, 6.0) {Token Embedding};
+\draw[arr] (input) -- (emb);
+
+% Positional embedding
+\node[lbl] (pe) at (\cx, 5.25) {$\oplus$ Positional Embedding};
+\draw[arr] (emb) -- (pe);
+
+% N× block
+\begin{scope}[on background layer]
+  \draw[rounded corners=5pt, fill=gray!12, draw=gray!50]
+    (\cx-1.75, 1.8) rectangle (\cx+1.75, 4.8);
+\end{scope}
+\node[lbl, gray] at (\cx+1.45, 4.6) {$\times N$};
+
+% Masked self-attention
+\node[attn] (msa) at (\cx, 4.1) {\shortstack{Masked\\[-1pt]Multi-Head Attention}};
+\draw[arr] (pe) -- (msa);
+
+\node[norm] (n1) at (\cx, 3.35) {Add \& Norm};
+\draw[arr] (msa) -- (n1);
+\draw[res] ([xshift=-1.6cm]msa.north) |- (n1.west);
+
+% Feed forward
+\node[ffn] (ff) at (\cx, 2.7) {Feed Forward};
+\draw[arr] (n1) -- (ff);
+
+\node[norm] (n2) at (\cx, 2.15) {Add \& Norm};
+\draw[arr] (ff) -- (n2);
+\draw[res] ([xshift=-1.6cm]ff.north) |- (n2.west);
+
+% Output head
+\node[head] (lin) at (\cx, 1.3) {Linear (tied weights)};
+\draw[arr] (n2) -- (lin);
+
+\node[head] (soft) at (\cx, 0.65) {Softmax};
+\draw[arr] (lin) -- (soft);
+
+\node[lbl] (oprob) at (\cx, 0) {Next-Token Probabilities};
+\draw[arr] (soft) -- (oprob);
+
+\end{tikzpicture}
+\end{center}
+
 \section{What GPT Changes}
 
 Beyond removing cross-attention, GPT introduces several modifications that are now standard practice. None of these are architecturally dramatic, but they each solve a specific problem.
@@ -96,56 +162,17 @@ The learned embedding for position \code{t} is looked up and added to the token 
 
 Why this works: for a fixed maximum sequence length (our \code{block\_size=256}), there is no advantage to the sinusoidal formula. A learned embedding has enough capacity to represent any position pattern the model needs. The sinusoidal encoding was designed to generalize to longer sequences than seen during training (via extrapolation of the sinusoidal functions), but in practice this extrapolation does not work well, and most models are trained and used within a fixed context window.
 
+\tip{%
+\textbf{\code{nn.Embedding} vs.\ \code{nn.Linear}.} An \code{Embedding(V, d)} is a lookup table: the input is an integer index, the output is the corresponding row of the weight matrix --- no multiplication, just \code{weight[index]}. A \code{Linear(d\_in, d\_out)} is a matrix multiply: the input is a continuous vector, the output is \code{x @ weight.T + bias}. The connection: if you one-hot encoded a token index and multiplied by a weight matrix, you would select exactly one row --- the same result as an Embedding lookup, but without materializing a sparse one-hot tensor. This is also why weight tying works: \code{lm\_head} (a Linear) computes \code{hidden @ wte.weight.T}, which dot-products the hidden state against every embedding row --- asking ``which embedding vector is this hidden state closest to?''
+}
+
 \subsection{GELU Instead of ReLU}
 
-The original transformer uses ReLU in the feed-forward network: \code{ReLU(x) = max(0, x)}. GPT uses GELU (Gaussian Error Linear Unit):
-
-\[\text{GELU}(x) = x \cdot \Phi(x)\]
-
-where $\Phi(x)$ is the CDF of the standard normal distribution. In practice, this is approximated as:
-
-\[\text{GELU}(x) \approx 0.5x\left(1 + \tanh\left[\sqrt{2/\pi}(x + 0.044715x^3)\right]\right)\]
-
-The key difference from ReLU: GELU is smooth everywhere (no sharp corner at zero) and it does not hard-zero negative inputs. Small negative values get a small negative output rather than exactly zero. This means gradients flow more smoothly through the network.
-
-\concepttag
-\begin{lstlisting}
-# In our FeedForward module:
-x = F.gelu(x)  # replaces F.relu(x)
-\end{lstlisting}
+The original transformer uses ReLU in the feed-forward network. GPT replaces it with GELU, which is smooth everywhere and does not hard-zero negative inputs. This was covered in detail in Document~02, Section~4. Our \code{FeedForward} module uses \code{F.gelu}.
 
 \subsection{Pre-Norm Instead of Post-Norm}
 
-The original paper applies LayerNorm after the residual addition (post-norm):
-
-\concepttag
-{\small\itshape Not used in our project --- shown for comparison.}
-\begin{lstlisting}
-# Post-norm (original paper)
-x = layer_norm(x + sublayer(x))
-\end{lstlisting}
-
-GPT applies LayerNorm before the sublayer (pre-norm):
-
-\concepttag
-{\small\itshape This is what our project uses.}
-\begin{lstlisting}
-# Pre-norm (GPT)
-x = x + sublayer(layer_norm(x))
-\end{lstlisting}
-
-Why this matters: in post-norm, the residual path passes through the normalization, which can distort the gradient signal. In pre-norm, the residual connection is a clean identity path --- gradients flow directly from the output back to the input without any transformation. This makes training more stable, especially for deeper models. Pre-norm is the standard in GPT-2, GPT-3, LLaMA, and most modern transformers.
-
-Our \code{TransformerBlock} in \code{src/model.py} uses pre-norm:
-
-\concepttag
-{\small\itshape From \code{TransformerBlock} in \code{src/model.py}.}
-\begin{lstlisting}
-def forward(self, x: torch.Tensor) -> torch.Tensor:
-    x = x + self.attn(self.ln_1(x))   # pre-norm attention
-    x = x + self.ffn(self.ln_2(x))    # pre-norm FFN
-    return x
-\end{lstlisting}
+The original paper applies LayerNorm \emph{after} the residual addition (post-norm). GPT applies it \emph{before} the sublayer (pre-norm), giving the residual connection a clean identity path for gradient flow. This was covered in detail in Document~02, Section~3. Our \code{TransformerBlock} uses pre-norm: \code{x = x + sublayer(layer\_norm(x))}.
 
 \subsection{Weight Tying}
 
@@ -161,6 +188,28 @@ self.transformer.wte.weight = self.lm_head.weight
 \end{lstlisting}
 
 This means \code{lm\_head} computes logits as a dot product between the hidden state and the token embeddings. A token's logit is high when the hidden state is close to that token's embedding vector. This reduces the parameter count (one less \code{vocab\_size x n\_embd} matrix) and acts as regularization --- the model is encouraged to produce embeddings that are directly useful for prediction.
+
+\subsection{Dropout}
+
+Dropout (Srivastava et al., 2014) is a regularization technique. During training, each activation is independently zeroed out with probability $p$:
+
+\[\text{Dropout}(x)_i = \begin{cases} 0 & \text{with probability } p \\ x_i \,/\, (1 - p) & \text{with probability } 1 - p \end{cases}\]
+
+The scaling by $1/(1-p)$ keeps the expected value of each element unchanged, so downstream layers see the same magnitude whether dropout is on or off.
+
+Why this works: dropout prevents \textbf{co-adaptation} --- neurons cannot rely on specific other neurons always being present, so the network learns more robust, redundant representations. Each forward pass trains a different random sub-network (some neurons removed, others kept), and they all share the same weights. The full network at inference time acts like an implicit ensemble of all those sub-networks.
+
+During inference (\code{model.eval()}), dropout is disabled entirely --- all activations pass through at full strength.
+
+Our model uses $p = 0.2$ and applies dropout in three places:
+
+\begin{enumerate}
+  \item \textbf{After the embedding addition} (\code{transformer.drop}): regularizes the combined token + position signal before it enters the transformer blocks.
+  \item \textbf{After attention weights} (\code{attn\_dropout} in \code{CausalSelfAttention}): randomly drops connections between positions, forcing the model not to over-rely on any single attention pattern.
+  \item \textbf{After each sublayer's output projection} (\code{resid\_dropout} in attention, \code{dropout} in FFN): regularizes the signal before it is added back via the residual connection.
+\end{enumerate}
+
+The original transformer paper applies dropout in the same three locations with $p = 0.1$. We use a higher rate because our model is small and our dataset is small --- stronger regularization helps prevent overfitting.
 
 \section{The Language Modeling Objective}
 
@@ -211,12 +260,16 @@ The model is organized as a \code{ModuleDict} called \code{transformer} plus a s
   \item \textbf{\code{lm\_head}}: \code{nn.Linear(384, 65, bias=False)}. Projects the final hidden states to logits over the vocabulary. Weight-tied with \code{wte}.
 \end{itemize}
 
+\tip{%
+\textbf{Why \code{c\_fc} and \code{c\_proj}?} These names come from OpenAI's GPT-2 codebase, which used 1D convolutions (\code{Conv1D}) instead of \code{nn.Linear} for these layers --- a 1$\times$1 convolution over the sequence dimension is mathematically identical to a per-position linear projection. The \code{c\_} prefix stands for ``convolution''; \code{fc} = fully connected (the expand layer), \code{proj} = projection (the contract/output layer). We keep the names so our weight dictionaries match GPT-2 checkpoints, which is useful if you ever want to load pretrained GPT-2 weights. The layers themselves are standard \code{nn.Linear}.
+}
+
 \subsection{Forward Pass}
 
 \concepttag
 {\small\itshape From \code{BabyGPT.forward} in \code{src/model.py}.}
 \begin{lstlisting}
-def forward(self, idx, targets=None):
+def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
     B, T = idx.shape
     pos = torch.arange(T, device=idx.device)
 
@@ -259,6 +312,10 @@ The attention sublayer has three Q, K, V projections and one output projection:
   \item \code{c\_proj} (output): $384 \times 384 = 147{,}456$
   \item Total attention weights: $442{,}368 + 147{,}456 = 589{,}824$
 \end{itemize}
+
+\tip{%
+\textbf{How multi-head attention slices the matrices.} Each \code{W\_Q}, \code{W\_K}, \code{W\_V} projection is a single $(384, 384)$ matrix, but conceptually it is $h = 6$ separate $(384, 64)$ projections stacked side by side. The per-head dimension is $d_k = n_{\text{embd}} / h = 384 / 6 = 64$. In code, we project the full 384-dim vector first, then \code{view} the result as $(B, T, 6, 64)$ and \code{transpose} to $(B, 6, T, 64)$ --- giving each head its own 64-dim Q, K, V to run attention on independently. After attention, the 6 heads of 64 dims are concatenated back to 384 and passed through \code{c\_proj}. One big matrix multiply is equivalent to 6 small ones, but runs faster on a GPU because it is a single contiguous operation.
+}
 
 The feed-forward sublayer has two linear layers with a 4x expansion:
 \begin{itemize}
@@ -349,17 +406,204 @@ class GPTConfig:
 
 \subsection{Step 2: The Model}
 
-Create \code{src/model.py} containing all the classes we have discussed: \code{LayerNorm}, \code{CausalSelfAttention}, \code{FeedForward}, \code{TransformerBlock}, and \code{BabyGPT}. The full file is in the project repository. Here is a summary of what goes in:
+Create \code{src/model.py} with the complete implementation. Every class from the previous documents is collected here.
 
 \filetag{src/model.py}
 \begin{lstlisting}
-# See the project's src/model.py for the complete implementation.
-# It contains, in order:
-#   - LayerNorm          (Document 02)
-#   - CausalSelfAttention (Document 01, Sections 7--8)
-#   - FeedForward        (Document 02, Section 4)
-#   - TransformerBlock   (Document 02, Section 5)
-#   - BabyGPT            (this document, "Our BabyGPT Architecture")
+"""BabyGPT: a decoder-only transformer language model."""
+
+import math
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from src.config import GPTConfig
+
+
+class LayerNorm(nn.Module):
+    """Hand-written LayerNorm with optional bias (Document 02, Section 3).
+
+    LayerNorm(x) = gamma * (x - mean) / sqrt(var + eps) + beta
+    Normalizes across the last dimension (features) per position.
+    gamma (weight) and beta (bias) are learnable affine parameters.
+    """
+
+    def __init__(self, config, eps=1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(config.n_embd))    # gamma
+        self.bias = nn.Parameter(torch.zeros(config.n_embd)) if config.bias else None  # beta
+        self.eps = eps
+
+    def forward(self, x):
+        mu = x.mean(dim=-1, keepdim=True)
+        sigma_sq = x.var(dim=-1, keepdim=True, unbiased=False)
+        x_normalized = (x - mu) / torch.sqrt(sigma_sq + self.eps)
+        out = self.weight * x_normalized
+        if self.bias is not None:
+            out = out + self.bias
+        return out
+
+
+class CausalSelfAttention(nn.Module):
+    """Multi-head self-attention with causal mask (Document 01).
+
+    Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V
+    Runs h heads in parallel by reshaping into (B, h, T, d_k).
+    Causal mask sets future positions to -inf before softmax.
+    """
+
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        # Each projection is (n_embd, n_embd), i.e. (384, 384).
+        # Conceptually this is h separate (n_embd, head_dim) projections
+        # stacked together: 6 heads x 64 dims = 384.
+        self.W_Q = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.W_K = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.W_V = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        self.n_head = config.n_head       # h = 6
+        self.n_embd = config.n_embd       # 384
+        self.head_dim = config.n_embd // config.n_head  # d_k = 384/6 = 64
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, C = x.shape  # C = n_embd = 384
+
+        # Project then split into heads:
+        # (B, T, 384) -> (B, T, 384) -> view as (B, T, 6, 64) -> (B, 6, T, 64)
+        # Each head gets its own 64-dim slice of Q, K, V.
+        q = self.W_Q(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.W_K(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        v = self.W_V(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+
+        # Attention per head: (B, 6, T, 64) @ (B, 6, 64, T) -> (B, 6, T, T)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+        scores = scores.masked_fill(~mask, float('-inf'))
+        weights = F.softmax(scores, dim=-1)
+        weights = self.attn_dropout(weights)
+        y = torch.matmul(weights, v)  # (B, 6, T, 64)
+
+        # Reassemble heads: (B, 6, T, 64) -> (B, T, 6, 64) -> (B, T, 384)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        return self.resid_dropout(self.c_proj(y))
+
+
+class FeedForward(nn.Module):
+    """Position-wise FFN with GELU (Document 02, Section 4).
+
+    FFN(x) = W2 * GELU(W1 * x)
+    Hidden dim is 4x the embedding dim (expand then contract).
+    """
+
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.c_fc(x)
+        x = F.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+
+
+class TransformerBlock(nn.Module):
+    """Pre-norm transformer block (Document 02, Section 5).
+
+    x = x + Attention(LayerNorm(x))   -- pre-norm + residual
+    x = x + FFN(LayerNorm(x))         -- pre-norm + residual
+    """
+
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.ln_1 = LayerNorm(config)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = LayerNorm(config)
+        self.ffn = FeedForward(config)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.ffn(self.ln_2(x))
+        return x
+
+
+class BabyGPT(nn.Module):
+    """Decoder-only transformer language model (this document).
+
+    Forward: tok_emb + pos_emb -> N x TransformerBlock -> LayerNorm -> lm_head
+    Loss: cross-entropy over vocab at every position (next-token prediction).
+    Weight tying: lm_head shares weights with token embedding.
+    """
+
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.config = config
+
+        self.transformer = nn.ModuleDict(dict(
+            wte=nn.Embedding(config.vocab_size, config.n_embd),
+            wpe=nn.Embedding(config.block_size, config.n_embd),
+            drop=nn.Dropout(config.dropout),
+            blocks=nn.ModuleList(
+                [TransformerBlock(config) for _ in range(config.n_layer)]
+            ),
+            ln_f=LayerNorm(config),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # Weight tying
+        self.transformer.wte.weight = self.lm_head.weight
+
+        # Initialize weights
+        self.apply(self._init_weights)
+        # Scaled init for residual projections (GPT-2 convention)
+        for pn, p in self.named_parameters():
+            if pn.endswith("c_proj.weight"):
+                nn.init.normal_(
+                    p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer)
+                )
+
+    def _init_weights(self, module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
+        B, T = idx.shape
+        assert T <= self.config.block_size
+        pos = torch.arange(T, device=idx.device)
+
+        tok_emb = self.transformer.wte(idx)      # (B, T, n_embd)
+        pos_emb = self.transformer.wpe(pos)      # (T, n_embd)
+        x = self.transformer.drop(tok_emb + pos_emb)
+
+        for block in self.transformer.blocks:
+            x = block(x)
+
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)                 # (B, T, vocab_size)
+
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+            )
+        return logits, loss
+
+    def count_parameters(self) -> int:
+        """Trainable parameters (excluding tied duplicates)."""
+        n = sum(p.numel() for p in self.parameters())
+        n -= self.lm_head.weight.numel()  # tied with wte
+        return n
 \end{lstlisting}
 
 \subsection{Step 3: Verify}

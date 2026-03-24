@@ -140,6 +140,12 @@ The complete generation pipeline is split across two files:
 \begin{lstlisting}
 @torch.no_grad()
 def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    """Autoregressive token generation (Sections 1--4).
+
+    Loop: forward pass -> logits / temperature -> top-k filter
+          -> softmax -> multinomial sample -> append token.
+    Crops to block_size when sequence exceeds context window.
+    """
     for _ in range(max_new_tokens):
         # Crop to block_size if sequence too long
         idx_cond = idx if idx.size(1) <= self.config.block_size \
@@ -176,7 +182,96 @@ uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8 --top-k 40
 
 \subsection{Creating the Generation Script}
 
-Create \code{src/generate.py} --- a CLI wrapper that loads a checkpoint, encodes the prompt, calls \code{model.generate()}, and prints the result. The full implementation is in the project repository.
+Create \code{src/generate.py} --- the CLI wrapper that loads a checkpoint, encodes the prompt, calls \code{model.generate()}, and prints the result:
+
+\filetag{src/generate.py}
+\begin{lstlisting}
+"""Generate text from a trained BabyGPT checkpoint."""
+
+import argparse
+from pathlib import Path
+
+import torch
+
+from src.config import GPTConfig
+from src.model import BabyGPT
+from src.tokenizer import CharTokenizer
+
+CHECKPOINT_DIR = Path(__file__).resolve().parent.parent / "checkpoints"
+
+
+def load_model(checkpoint_path, device):
+    """Load a model and tokenizer from a checkpoint (Section 6).
+
+    Checkpoint contains: model state_dict, GPTConfig, vocab mapping.
+    Reconstructs BabyGPT + CharTokenizer, sets model to eval mode.
+    """
+    checkpoint = torch.load(
+        checkpoint_path, map_location=device, weights_only=False
+    )
+    config = checkpoint["config"]
+    model = BabyGPT(config)
+    model.load_state_dict(checkpoint["model"])
+    model.to(device)
+    model.eval()
+
+    # Reconstruct tokenizer from saved vocab
+    vocab = checkpoint["vocab"]
+    tok = CharTokenizer.__new__(CharTokenizer)
+    tok.char_to_idx = vocab
+    tok.idx_to_char = {i: ch for ch, i in vocab.items()}
+
+    print(f"Loaded model from {checkpoint_path}")
+    print(
+        f"  step={checkpoint.get('step', '?')}, "
+        f"val_loss={checkpoint.get('val_loss', '?'):.4f}"
+    )
+    return model, tok
+
+
+def generate(model, tokenizer, prompt, max_new_tokens=500,
+             temperature=1.0, top_k=None, device=torch.device("cpu")):
+    """Encode prompt -> model.generate() -> decode back to string."""
+    tokens = tokenizer.encode(prompt)
+    idx = torch.tensor([tokens], dtype=torch.long, device=device)
+    output = model.generate(
+        idx, max_new_tokens, temperature=temperature, top_k=top_k
+    )
+    return tokenizer.decode(output[0].tolist())
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate text with BabyGPT")
+    parser.add_argument("--prompt", type=str, default="\n")
+    parser.add_argument("--max-tokens", type=int, default=500)
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=str(CHECKPOINT_DIR / "best.pt"),
+    )
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, tokenizer = load_model(Path(args.checkpoint), device)
+
+    text = generate(
+        model, tokenizer,
+        prompt=args.prompt,
+        max_new_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        device=device,
+    )
+    print("\n" + "=" * 60)
+    print(text)
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
 
 \shelltag
 \begin{lstlisting}[language=bash]

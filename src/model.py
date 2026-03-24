@@ -1,9 +1,4 @@
-"""BabyGPT: a decoder-only transformer language model.
-
-Every class here maps directly to a concept from the "Attention Is All You Need"
-paper, adapted for the decoder-only (GPT) variant. See learn/ documents for the
-full derivations.
-"""
+"""BabyGPT: a decoder-only transformer language model."""
 
 import math
 
@@ -15,89 +10,81 @@ from src.config import GPTConfig
 
 
 class LayerNorm(nn.Module):
-    """Layer normalization with optional bias.
+    """Hand-written LayerNorm with optional bias (Document 02, Section 3).
 
-    Normalizes across the last dimension (features) for each position
-    independently. Learnable affine parameters gamma (weight) and beta (bias)
-    rescale and shift the output.
-
-    Math: LayerNorm(x) = gamma * (x - mean) / (std + eps) + beta
+    LayerNorm(x) = gamma * (x - mean) / sqrt(var + eps) + beta
+    Normalizes across the last dimension (features) per position.
+    gamma (weight) and beta (bias) are learnable affine parameters.
     """
 
-    def __init__(self, n_embd: int, bias: bool = False, eps: float = 1e-5):
+    def __init__(self, config: GPTConfig, eps: float = 1e-5):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(n_embd))
-        self.bias = nn.Parameter(torch.zeros(n_embd)) if bias else None
+        self.weight = nn.Parameter(torch.ones(config.n_embd))    # gamma
+        self.bias = nn.Parameter(torch.zeros(config.n_embd)) if config.bias else None  # beta
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.layer_norm(x, self.weight.shape, self.weight, self.bias, self.eps)
+        mu = x.mean(dim=-1, keepdim=True)
+        sigma_sq = x.var(dim=-1, keepdim=True, unbiased=False)
+        x_normalized = (x - mu) / torch.sqrt(sigma_sq + self.eps)
+        out = self.weight * x_normalized
+        if self.bias is not None:
+            out = out + self.bias
+        return out
 
 
 class CausalSelfAttention(nn.Module):
-    """Multi-head self-attention with a causal (autoregressive) mask.
+    """Multi-head self-attention with causal mask (Document 01).
 
-    Implements the core attention formula:
-        Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V
-
-    Multiple heads run in parallel by reshaping the projected Q, K, V tensors
-    so that the batch and head dimensions are both treated as batch dimensions.
+    Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V
+    Runs h heads in parallel by reshaping into (B, h, T, d_k).
+    Causal mask sets future positions to -inf before softmax.
     """
 
     def __init__(self, config: GPTConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-
-        # Separate projections for Q, K, V
+        # Each projection is (n_embd, n_embd), i.e. (384, 384).
+        # Conceptually this is h separate (n_embd, head_dim) projections
+        # stacked together: 6 heads x 64 dims = 384.
         self.W_Q = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.W_K = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.W_V = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        # Output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
-
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.head_dim = config.n_embd // config.n_head
+        self.n_head = config.n_head       # h = 6
+        self.n_embd = config.n_embd       # 384
+        self.head_dim = config.n_embd // config.n_head  # d_k = 384/6 = 64
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.shape  # batch, sequence length, embedding dim
+        B, T, C = x.shape  # C = n_embd = 384
 
-        # Project to Q, K, V and reshape into heads
-        # (B, T, C) -> (B, n_head, T, head_dim)
-        q = self.W_Q(x)
-        k = self.W_K(x)
-        v = self.W_V(x)
-        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        # Project then split into heads:
+        # (B, T, 384) -> (B, T, 384) -> view as (B, T, 6, 64) -> (B, 6, T, 64)
+        # Each head gets its own 64-dim slice of Q, K, V.
+        q = self.W_Q(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.W_K(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        v = self.W_V(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
-        # Scaled dot-product attention with causal mask
-        # (same formula from Document 01 Section 6, applied per head)
+        # Attention per head: (B, 6, T, 64) @ (B, 6, 64, T) -> (B, 6, T, T)
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
         scores = scores.masked_fill(~mask, float('-inf'))
         weights = F.softmax(scores, dim=-1)
         weights = self.attn_dropout(weights)
-        y = torch.matmul(weights, v)
+        y = torch.matmul(weights, v)  # (B, 6, T, 64)
 
-        # Reassemble heads: (B, n_head, T, head_dim) -> (B, T, C)
+        # Reassemble heads: (B, 6, T, 64) -> (B, T, 6, 64) -> (B, T, 384)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-
-        # Output projection + dropout
         return self.resid_dropout(self.c_proj(y))
 
 
 class FeedForward(nn.Module):
-    """Position-wise feed-forward network.
+    """Position-wise FFN with GELU (Document 02, Section 4).
 
-    A two-layer MLP applied independently to each position:
-        FFN(x) = W2 * GELU(W1 * x) + b2
-
-    The hidden dimension is 4x the embedding dimension, giving the network
-    more capacity to process each position's representation.
+    FFN(x) = W2 * GELU(W1 * x)
+    Hidden dim is 4x the embedding dim (expand then contract).
     """
 
     def __init__(self, config: GPTConfig):
@@ -115,22 +102,17 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """A single transformer block: pre-norm attention + pre-norm FFN.
+    """Pre-norm transformer block (Document 02, Section 5).
 
-    Data flow:
-        x -> LayerNorm -> CausalSelfAttention -> + residual
-          -> LayerNorm -> FeedForward          -> + residual
-
-    Pre-norm means we normalize *before* the sublayer, not after (the original
-    paper used post-norm). Pre-norm is more stable to train and is the default
-    in GPT-2, GPT-3, and most modern transformers.
+    x = x + Attention(LayerNorm(x))   -- pre-norm + residual
+    x = x + FFN(LayerNorm(x))         -- pre-norm + residual
     """
 
     def __init__(self, config: GPTConfig):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_1 = LayerNorm(config)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_2 = LayerNorm(config)
         self.ffn = FeedForward(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -140,16 +122,11 @@ class TransformerBlock(nn.Module):
 
 
 class BabyGPT(nn.Module):
-    """Decoder-only transformer language model (GPT architecture).
+    """Decoder-only transformer language model (Document 04).
 
-    Components:
-        1. Token embedding: maps token IDs to vectors of size n_embd
-        2. Position embedding: learned embedding for each position 0..block_size-1
-        3. Transformer blocks: N stacked TransformerBlock layers
-        4. Final LayerNorm
-        5. Language model head: projects back to vocab_size logits
-
-    Weight tying: the token embedding and lm_head share the same weight matrix.
+    Forward: tok_emb + pos_emb -> N x TransformerBlock -> LayerNorm -> lm_head
+    Loss: cross-entropy over vocab at every position (next-token prediction).
+    Weight tying: lm_head shares weights with token embedding.
     """
 
     def __init__(self, config: GPTConfig):
@@ -157,27 +134,27 @@ class BabyGPT(nn.Module):
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
-            wte=nn.Embedding(config.vocab_size, config.n_embd),          # token embedding
-            wpe=nn.Embedding(config.block_size, config.n_embd),          # position embedding
+            wte=nn.Embedding(config.vocab_size, config.n_embd),
+            wpe=nn.Embedding(config.block_size, config.n_embd),
             drop=nn.Dropout(config.dropout),
-            blocks=nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)]),
-            ln_f=LayerNorm(config.n_embd, bias=config.bias),             # final layer norm
+            blocks=nn.ModuleList(
+                [TransformerBlock(config) for _ in range(config.n_layer)]
+            ),
+            ln_f=LayerNorm(config),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        # Weight tying: embedding and output projection share weights.
-        # This reduces parameters and acts as a form of regularization — the
-        # model is encouraged to produce embeddings that are directly useful
-        # for predicting the next token.
+        # Weight tying
         self.transformer.wte.weight = self.lm_head.weight
 
         # Initialize weights
         self.apply(self._init_weights)
-        # Scaled initialization for residual projections (GPT-2 convention):
-        # scale down by 1/sqrt(2*n_layer) to keep variance from growing with depth
+        # Scaled init for residual projections (GPT-2 convention)
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
-                nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
+                nn.init.normal_(
+                    p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer)
+                )
 
     def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear):
@@ -192,43 +169,26 @@ class BabyGPT(nn.Module):
         idx: torch.Tensor,
         targets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """
-        Args:
-            idx: (B, T) tensor of token indices
-            targets: (B, T) tensor of target token indices, or None for inference
-
-        Returns:
-            logits: (B, T, vocab_size)
-            loss: scalar cross-entropy loss if targets provided, else None
-        """
         B, T = idx.shape
-        assert T <= self.config.block_size, \
-            f"Sequence length {T} exceeds block_size {self.config.block_size}"
-
-        # Position indices: 0, 1, 2, ..., T-1
+        assert T <= self.config.block_size
         pos = torch.arange(T, device=idx.device)
 
-        # Token embeddings + position embeddings
-        tok_emb = self.transformer.wte(idx)     # (B, T, n_embd)
-        pos_emb = self.transformer.wpe(pos)     # (T, n_embd) — broadcast over batch
+        tok_emb = self.transformer.wte(idx)      # (B, T, n_embd)
+        pos_emb = self.transformer.wpe(pos)      # (T, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
 
-        # Pass through all transformer blocks
         for block in self.transformer.blocks:
             x = block(x)
 
-        # Final layer norm + project to vocabulary
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)  # (B, T, vocab_size)
+        logits = self.lm_head(x)                 # (B, T, vocab_size)
 
         loss = None
         if targets is not None:
-            # Cross-entropy expects (N, C) and (N,), so flatten
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
             )
-
         return logits, loss
 
     @torch.no_grad()
@@ -239,27 +199,19 @@ class BabyGPT(nn.Module):
         temperature: float = 1.0,
         top_k: int | None = None,
     ) -> torch.Tensor:
-        """Autoregressive token generation.
+        """Autoregressive token generation (Document 06, Sections 1-4).
 
-        Args:
-            idx: (B, T) conditioning token indices
-            max_new_tokens: number of tokens to generate
-            temperature: >1 = more random, <1 = more deterministic
-            top_k: if set, only sample from the top k most probable tokens
-
-        Returns:
-            (B, T + max_new_tokens) tensor of token indices
+        Loop: forward pass -> logits / temperature -> top-k filter
+              -> softmax -> multinomial sample -> append token.
+        Crops to block_size when sequence exceeds context window.
         """
         for _ in range(max_new_tokens):
-            # Crop to block_size if the sequence has grown too long
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
 
             logits, _ = self(idx_cond)
-            # Take logits at the last position
             logits = logits[:, -1, :] / temperature  # (B, vocab_size)
 
             if top_k is not None:
-                # Zero out everything below the top-k values
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = float("-inf")
 
@@ -270,12 +222,7 @@ class BabyGPT(nn.Module):
         return idx
 
     def count_parameters(self) -> int:
-        """Return total number of trainable parameters (excluding tied weights)."""
-        # lm_head.weight is tied to wte.weight, so subtract it
-        n_params = sum(p.numel() for p in self.parameters())
-        n_params -= self.transformer.wpe.weight.numel()  # don't subtract — this is unique
-        # Actually, just count unique parameters
-        n_params = sum(p.numel() for p in self.parameters())
-        # wte and lm_head share weight, so we've double-counted
-        n_params -= self.lm_head.weight.numel()
-        return n_params
+        """Trainable parameters (excluding tied duplicates)."""
+        n = sum(p.numel() for p in self.parameters())
+        n -= self.lm_head.weight.numel()  # tied with wte
+        return n

@@ -13,6 +13,12 @@ Our tokenizer (in \code{src/tokenizer.py}) is the simplest possible: sort the un
 \filetag{src/tokenizer.py}
 \begin{lstlisting}
 class CharTokenizer:
+    """Character-level tokenizer (Section 1).
+
+    encode: string -> list of ints (one per character).
+    decode: list of ints -> string. Vocab = sorted unique chars.
+    """
+
     def __init__(self, text: str):
         chars = sorted(set(text))
         self.char_to_idx = {ch: i for i, ch in enumerate(chars)}
@@ -102,7 +108,114 @@ Each batch contains 64 sequences of length 256, giving $64 \times 256 = 16{,}384
 
 \subsection{Creating the Data Pipeline}
 
-Create \code{src/tokenizer.py} with the \code{CharTokenizer} class shown above, and \code{src/dataset.py} with the download, dataset, and dataloader logic. The full implementations are in the project repository.
+Create the tokenizer and dataset files. The tokenizer was shown above; here is the full dataset module:
+
+\filetag{src/dataset.py}
+\begin{lstlisting}
+"""TinyShakespeare dataset: download, tokenize, and create DataLoaders."""
+
+import os
+from pathlib import Path
+
+import requests
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+from src.tokenizer import CharTokenizer
+from src.config import GPTConfig
+
+DATA_URL = (
+    "https://raw.githubusercontent.com/karpathy/char-rnn/"
+    "master/data/tinyshakespeare/input.txt"
+)
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_FILE = DATA_DIR / "tinyshakespeare.txt"
+
+
+def download_data() -> str:
+    """Download TinyShakespeare if not already present. Return the text."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not DATA_FILE.exists():
+        print(f"Downloading TinyShakespeare to {DATA_FILE} ...")
+        resp = requests.get(DATA_URL, timeout=30)
+        resp.raise_for_status()
+        DATA_FILE.write_text(resp.text)
+        print(f"Downloaded {len(resp.text):,} characters.")
+    return DATA_FILE.read_text()
+
+
+class ShakespeareDataset(Dataset):
+    """Yields (x, y) pairs for next-token prediction (Section 2).
+
+    Each sample: a contiguous slice of block_size+1 tokens.
+    x = chunk[:-1] (input), y = chunk[1:] (target, shifted by 1).
+    One (x, y) pair gives block_size training examples.
+    """
+
+    def __init__(self, data: torch.Tensor, block_size: int):
+        self.data = data
+        self.block_size = block_size
+
+    def __len__(self) -> int:
+        return len(self.data) - self.block_size
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        chunk = self.data[idx : idx + self.block_size + 1]
+        x = chunk[:-1]  # (block_size,)
+        y = chunk[1:]    # (block_size,)
+        return x, y
+
+
+def get_dataloaders(
+    config: GPTConfig,
+    batch_size: int = 64,
+    num_workers: int = 0,
+) -> tuple[DataLoader, DataLoader, CharTokenizer]:
+    """Download data, build tokenizer, return (train_loader, val_loader, tokenizer)."""
+    text = download_data()
+    tokenizer = CharTokenizer(text)
+
+    data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
+
+    split = int(0.9 * len(data))
+    train_data = data[:split]
+    val_data = data[split:]
+
+    train_dataset = ShakespeareDataset(train_data, config.block_size)
+    val_dataset = ShakespeareDataset(val_data, config.block_size)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
+
+    return train_loader, val_loader, tokenizer
+
+
+if __name__ == "__main__":
+    text = download_data()
+    tok = CharTokenizer(text)
+    print(f"Characters: {len(text):,}")
+    print(f"Vocab size: {tok.vocab_size}")
+    print(f"Vocab: {''.join(sorted(tok.char_to_idx.keys()))!r}")
+
+    data = torch.tensor(tok.encode(text), dtype=torch.long)
+    split = int(0.9 * len(data))
+    print(f"Train tokens: {split:,}")
+    print(f"Val tokens:   {len(data) - split:,}")
+\end{lstlisting}
 
 \shelltag
 \begin{lstlisting}[language=bash]
@@ -382,7 +495,205 @@ The checkpoint includes everything needed to reconstruct the model: the weights,
 
 \subsection{Running Training}
 
-Create \code{src/train.py} with the optimizer setup, learning rate schedule, and training loop described above. The full implementation is in the project repository.
+Create \code{src/train.py} with the complete training script:
+
+\filetag{src/train.py}
+\begin{lstlisting}
+"""Training script for BabyGPT on TinyShakespeare."""
+
+import argparse
+import math
+import time
+from pathlib import Path
+
+import torch
+
+from src.config import GPTConfig
+from src.dataset import get_dataloaders
+from src.model import BabyGPT
+
+# ---- Hyperparameters ----
+BATCH_SIZE = 64
+MAX_ITERS = 5000
+EVAL_INTERVAL = 250
+EVAL_ITERS = 200
+
+LEARNING_RATE = 1e-3
+MIN_LR = 1e-4
+WARMUP_ITERS = 100
+LR_DECAY_ITERS = 5000
+
+WEIGHT_DECAY = 0.1
+BETA1 = 0.9
+BETA2 = 0.99
+GRAD_CLIP = 1.0
+
+CHECKPOINT_DIR = Path(__file__).resolve().parent.parent / "checkpoints"
+
+
+def get_lr(step: int) -> float:
+    """Cosine annealing with linear warmup (Section 4).
+
+    Warmup: lr = max_lr * step / warmup_iters
+    Decay:  lr = min_lr + 0.5*(max_lr - min_lr)*(1 + cos(pi * progress))
+    """
+    if step < WARMUP_ITERS:
+        return LEARNING_RATE * step / WARMUP_ITERS
+    if step > LR_DECAY_ITERS:
+        return MIN_LR
+    progress = (step - WARMUP_ITERS) / (LR_DECAY_ITERS - WARMUP_ITERS)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return MIN_LR + coeff * (LEARNING_RATE - MIN_LR)
+
+
+def configure_optimizer(model: BabyGPT) -> torch.optim.AdamW:
+    """AdamW with separate parameter groups for weight decay (Section 3).
+
+    AdamW: theta -= lr * m_hat/sqrt(v_hat+eps) - lr * lambda * theta
+    2D params (weight matrices) get decay; 1D params (biases, norms) don't.
+    """
+    decay_params = []
+    no_decay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.dim() < 2:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+    optim_groups = [
+        {"params": decay_params, "weight_decay": WEIGHT_DECAY},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
+    return torch.optim.AdamW(optim_groups, lr=LEARNING_RATE, betas=(BETA1, BETA2))
+
+
+@torch.no_grad()
+def estimate_loss(model, train_loader, val_loader, device, eval_iters=EVAL_ITERS):
+    """Estimate train/val loss by averaging over eval_iters batches (Section 5).
+
+    Runs model.eval() (disables dropout), no gradient tracking.
+    Returns {"train": avg_loss, "val": avg_loss}.
+    """
+    model.eval()
+    out = {}
+    for split, loader in [("train", train_loader), ("val", val_loader)]:
+        losses = []
+        loader_iter = iter(loader)
+        for _ in range(eval_iters):
+            try:
+                x, y = next(loader_iter)
+            except StopIteration:
+                loader_iter = iter(loader)
+                x, y = next(loader_iter)
+            x, y = x.to(device), y.to(device)
+            _, loss = model(x, y)
+            losses.append(loss.item())
+        out[split] = sum(losses) / len(losses)
+    model.train()
+    return out
+
+
+def train(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    if device.type == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name()}")
+
+    torch.manual_seed(42)
+    if device.type == "cuda":
+        torch.cuda.manual_seed(42)
+
+    config = GPTConfig()
+    train_loader, val_loader, tokenizer = get_dataloaders(
+        config, batch_size=BATCH_SIZE
+    )
+    config.vocab_size = tokenizer.vocab_size
+    print(f"Vocab size: {config.vocab_size}")
+
+    model = BabyGPT(config).to(device)
+    print(f"Model parameters: {model.count_parameters():,}")
+
+    optimizer = configure_optimizer(model)
+
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    best_val_loss = float("inf")
+    train_iter = iter(train_loader)
+    t0 = time.time()
+
+    for step in range(args.max_iters):
+        lr = get_lr(step)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+
+        try:
+            x, y = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train_loader)
+            x, y = next(train_iter)
+        x, y = x.to(device), y.to(device)
+
+        with torch.amp.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+            _, loss = model(x, y)
+
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+
+        if step % EVAL_INTERVAL == 0 or step == args.max_iters - 1:
+            losses = estimate_loss(model, train_loader, val_loader, device)
+            elapsed = time.time() - t0
+            tok_s = (step + 1) * BATCH_SIZE * config.block_size / elapsed
+            print(
+                f"step {step:5d} | "
+                f"train loss {losses['train']:.4f} | "
+                f"val loss {losses['val']:.4f} | "
+                f"lr {lr:.2e} | "
+                f"tok/s {tok_s:.0f}"
+            )
+            if losses["val"] < best_val_loss:
+                best_val_loss = losses["val"]
+                checkpoint = {
+                    "model": model.state_dict(),
+                    "config": config,
+                    "step": step,
+                    "val_loss": best_val_loss,
+                    "vocab": tokenizer.char_to_idx,
+                }
+                torch.save(checkpoint, CHECKPOINT_DIR / "best.pt")
+                print(f"  -> saved checkpoint (val_loss={best_val_loss:.4f})")
+
+    checkpoint = {
+        "model": model.state_dict(),
+        "config": config,
+        "step": args.max_iters,
+        "val_loss": best_val_loss,
+        "vocab": tokenizer.char_to_idx,
+    }
+    torch.save(checkpoint, CHECKPOINT_DIR / "final.pt")
+
+    total_time = time.time() - t0
+    print(f"\nTraining complete in {total_time:.1f}s")
+    print(f"Best val loss: {best_val_loss:.4f}")
+    print(f"Checkpoints saved to {CHECKPOINT_DIR}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train BabyGPT")
+    parser.add_argument("--max-iters", type=int, default=MAX_ITERS)
+    args = parser.parse_args()
+    train(args)
+
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
 
 \shelltag
 \begin{lstlisting}[language=bash]
