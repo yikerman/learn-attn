@@ -1,30 +1,14 @@
-"""TinyShakespeare dataset: download, tokenize, and create DataLoaders."""
+"""TinyShakespeare dataset: tokenize and create DataLoaders."""
 
-import os
 from pathlib import Path
 
-import requests
 import torch
 from torch.utils.data import Dataset, DataLoader
 
 from src.tokenizer import CharTokenizer
 from src.config import GPTConfig
 
-DATA_URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-DATA_FILE = DATA_DIR / "tinyshakespeare.txt"
-
-
-def download_data() -> str:
-    """Download TinyShakespeare if not already present. Return the text."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not DATA_FILE.exists():
-        print(f"Downloading TinyShakespeare to {DATA_FILE} ...")
-        resp = requests.get(DATA_URL, timeout=30)
-        resp.raise_for_status()
-        DATA_FILE.write_text(resp.text)
-        print(f"Downloaded {len(resp.text):,} characters.")
-    return DATA_FILE.read_text()
+DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "tinyshakespeare.txt"
 
 
 class ShakespeareDataset(Dataset):
@@ -55,8 +39,8 @@ def get_dataloaders(
     batch_size: int = 64,
     num_workers: int = 0,
 ) -> tuple[DataLoader, DataLoader, CharTokenizer]:
-    """Download data, build tokenizer, return (train_loader, val_loader, tokenizer)."""
-    text = download_data()
+    """Read data, build tokenizer, return (train_loader, val_loader, tokenizer)."""
+    text = DATA_FILE.read_text()
     tokenizer = CharTokenizer(text)
 
     # Encode entire text as a single long tensor
@@ -91,7 +75,7 @@ def get_dataloaders(
 
 
 if __name__ == "__main__":
-    text = download_data()
+    text = DATA_FILE.read_text()
     tok = CharTokenizer(text)
     print(f"Characters: {len(text):,}")
     print(f"Vocab size: {tok.vocab_size}")

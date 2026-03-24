@@ -55,6 +55,7 @@ When the user asks questions while reading `learn/` documents:
 1. Answer the question in conversation.
 2. Record the answer as a **Tip** section inside the relevant `learn/` document, matching the document's existing writing style and tone.
 3. Place the tip near the content that prompted the question so future readers benefit.
+4. Make sure documents' code are sync with `src/`.
 
 ## Document Progression
 1. `01-attention-from-first-principles.md` — scaled dot-product attention, multi-head, masking
