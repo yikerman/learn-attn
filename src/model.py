@@ -48,8 +48,10 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
 
-        # Combined projection for Q, K, V (more efficient than three separate ones)
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        # Separate projections for Q, K, V
+        self.W_Q = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.W_K = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.W_V = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # Output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
 
@@ -63,23 +65,23 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape  # batch, sequence length, embedding dim
 
-        # Project to Q, K, V and split into heads
-        # (B, T, 3*C) -> 3 x (B, T, C) -> 3 x (B, n_head, T, head_dim)
-        qkv = self.c_attn(x)
-        q, k, v = qkv.split(self.n_embd, dim=2)
+        # Project to Q, K, V and reshape into heads
+        # (B, T, C) -> (B, n_head, T, head_dim)
+        q = self.W_Q(x)
+        k = self.W_K(x)
+        v = self.W_V(x)
         q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
         # Scaled dot-product attention with causal mask
-        # PyTorch's F.scaled_dot_product_attention handles the mask, scaling,
-        # softmax, and dropout in a single fused kernel (flash attention).
-        y = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=None,
-            dropout_p=self.attn_dropout.p if self.training else 0.0,
-            is_causal=True,
-        )
+        # (same formula from Document 01 Section 6, applied per head)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+        scores = scores.masked_fill(~mask, float('-inf'))
+        weights = F.softmax(scores, dim=-1)
+        weights = self.attn_dropout(weights)
+        y = torch.matmul(weights, v)
 
         # Reassemble heads: (B, n_head, T, head_dim) -> (B, T, C)
         y = y.transpose(1, 2).contiguous().view(B, T, C)

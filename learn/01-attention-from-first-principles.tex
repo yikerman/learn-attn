@@ -59,6 +59,8 @@ In attention, we assign each position two roles:
 
 The dot product $\mathbf{q} \cdot \mathbf{k}$ measures how well the query at one position matches the key at another. High dot product means high relevance.
 
+In practice, $\mathbf{q}$ and $\mathbf{k}$ are not stored directly --- they are produced by multiplying the token embedding $\mathbf{x}$ by learned weight matrices: $\mathbf{q} = \mathbf{x}\, W^Q$ and $\mathbf{k} = \mathbf{x}\, W^K$. The network learns these projections during training.
+
 \textbf{Concrete example.} Suppose we have 3 positions with query and key vectors in $\mathbb{R}^4$:
 
 \demotag
@@ -92,7 +94,9 @@ tensor([[2., 0., 1.],
 
 Reading row 0: position 0's query is most similar to position 0's key (score 2), completely orthogonal to position 1's key (score 0), and moderately similar to position 2's key (score 1). This is exactly what you would verify by hand --- $\mathbf{q}_0 = [1, 0, 1, 0]$ and $\mathbf{k}_0 = [1, 0, 1, 0]$ share all their nonzero components, while $\mathbf{k}_1 = [0, 1, 0, 1]$ has nonzero components exactly where $\mathbf{q}_0$ is zero.
 
-\textbf{Dimensions.} If $Q$ is $(T, d_k)$ and $K$ is $(T, d_k)$, then $QK^\top$ is $(T, d_k) \times (d_k, T) = (T, T)$. Each entry $(i, j)$ in this matrix is the raw attention score from position $i$ to position $j$. We get a score for every pair of positions.
+\tip{Why the transpose? A single dot product $\mathbf{q}_i \cdot \mathbf{k}_j$ gives one similarity score. We need \emph{all} $T^2$ pairwise scores at once. \code{K.transpose(-2, -1)} flips $K$ from $(T, d_k)$ to $(d_k, T)$, turning each key into a column. Then \code{torch.matmul(Q, K\^{}T)} computes row $\times$ column for every $(i, j)$ pair --- entry $(i, j)$ of the result is exactly $\mathbf{q}_i \cdot \mathbf{k}_j$. The matrix multiply is just all $T^2$ dot products in one shot.}
+
+\textbf{Dimensions.} We write $d_k$ for the dimension of each query and key vector (the same $d$ from Section~2). If $Q$ is $(T, d_k)$ and $K$ is $(T, d_k)$, then $QK^\top$ is $(T, d_k) \times (d_k, T) = (T, T)$. Each entry $(i, j)$ in this matrix is the raw attention score from position $i$ to position $j$. We get a score for every pair of positions.
 
 \bigskip\hrule\bigskip
 
@@ -109,7 +113,7 @@ Here is the variance argument. Suppose each component of $\mathbf{q}$ and $\math
   \item The standard deviation is $\sqrt{d_k}$.
 \end{itemize}
 
-So the dot product is a zero-mean random variable with standard deviation $\sqrt{d_k}$. When $d_k = 64$ (a common head dimension), the standard deviation is 8. Dot products routinely land in the range $[-16, +16]$ or wider.
+So the dot product is a zero-mean random variable with standard deviation $\sqrt{d_k}$. When $d_k = 64$ (a typical value in practice), the standard deviation is 8. Dot products routinely land in the range $[-16, +16]$ or wider.
 
 Why does this matter? Consider what softmax does with large inputs. If one score is 10 and the rest are near 0, then $\exp(10) \approx 22026$ dominates the denominator, and the output is nearly one-hot. In the backward pass, the gradients of softmax near a one-hot output are very close to zero --- the model is ``confident'' and stops learning. This is the softmax saturation problem.
 
@@ -154,13 +158,15 @@ weights = F.softmax(scores, dim=-1)  # (T, T)
 
 The \code{dim=-1} means we apply softmax across the last dimension (the key dimension), so each row independently becomes a probability distribution. Row $i$ tells us: ``how much should position $i$ attend to each other position?''
 
+\tip{Think of softmax as two steps: (1)~pass every element through $e^x$, which makes all values strictly positive \emph{and} amplifies larger values exponentially; (2)~divide each result by the sum of all of them, so the vector sums to~1. Step~1 is the nonlinearity that separates winners from losers; step~2 is just linear normalization.}
+
 \textbf{Connection to temperature.} More generally, softmax with temperature $\tau$ is $\mathrm{softmax}(\mathbf{z} / \tau)$. When $\tau$ is small, the distribution sharpens toward a one-hot on the maximum element. When $\tau$ is large, the distribution flattens toward uniform. The $\sqrt{d_k}$ scaling is exactly this: we implicitly set $\tau = \sqrt{d_k}$, preventing the distribution from being too sharp at initialization.
 
 \bigskip\hrule\bigskip
 
 \section{The Full Attention Formula}
 
-We now have all the ingredients. Each position also has a \textbf{value} vector $\mathbf{v}$ --- ``what I contribute to others if they attend to me.'' The full scaled dot-product attention formula is:
+We now have all the ingredients. Each position also has a \textbf{value} vector $\mathbf{v}$ --- ``what I contribute to others if they attend to me.'' Like queries and keys, it is a learned projection of the token embedding: $\mathbf{v} = \mathbf{x}\, W^V$. The full scaled dot-product attention formula is:
 
 \[
 \mathrm{Attention}(Q, K, V) = \mathrm{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right) V
@@ -174,17 +180,15 @@ Expression & Shape & What it represents \\
 \midrule
 $Q$ & $(T, d_k)$ & Query vectors for each position \\
 $K$ & $(T, d_k)$ & Key vectors for each position \\
-$V$ & $(T, d_v)$ & Value vectors for each position \\
+$V$ & $(T, d_k)$ & Value vectors for each position \\
 $QK^\top$ & $(T, T)$ & Raw attention scores for all position pairs \\
 $QK^\top / \sqrt{d_k}$ & $(T, T)$ & Scaled scores (unit variance) \\
 $\mathrm{softmax}(QK^\top / \sqrt{d_k})$ & $(T, T)$ & Attention weights (each row sums to 1) \\
-$\mathrm{softmax}(\cdots)\, V$ & $(T, d_v)$ & Weighted combination of value vectors \\
+$\mathrm{softmax}(\cdots)\, V$ & $(T, d_k)$ & Weighted combination of value vectors \\
 \bottomrule
 \end{tabular}
 
-\bigskip
-
-The output has shape $(T, d_v)$. Each row $i$ of the output is a weighted average of the value vectors, where the weights come from how well position $i$'s query matches each position's key. Typically $d_v = d_k$, so the output has the same dimensionality as the input queries and keys.
+The output has shape $(T, d_k)$. Each row $i$ of the output is a weighted average of the value vectors, where the weights come from how well position $i$'s query matches each position's key.
 
 \textbf{Complete implementation:}
 
@@ -202,11 +206,11 @@ def attention(Q, K, V, mask=None):
     Args:
         Q: (*, T, d_k) query vectors
         K: (*, S, d_k) key vectors
-        V: (*, S, d_v) value vectors
+        V: (*, S, d_k) value vectors
         mask: broadcastable to (*, T, S), 0 where attention is forbidden
 
     Returns:
-        (*, T, d_v) attended values
+        (*, T, d_k) attended values
     """
     d_k = Q.size(-1)
     scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
@@ -218,10 +222,43 @@ def attention(Q, K, V, mask=None):
 
 A few things to note:
 \begin{itemize}
-  \item The \code{*} in the shape annotations means this works with arbitrary leading batch dimensions. This is important for multi-head attention (Section 6).
-  \item The \code{mask} argument is for causal masking (Section 7). Where the mask is 0, we set the score to $-\infty$ before softmax, which makes the weight exactly 0.
+  \item The \code{*} in the shape annotations means this works with arbitrary leading batch dimensions --- useful when processing multiple sequences at once.
+  \item The \code{mask} argument is for causal masking (Section~8). Where the mask is 0, we set the score to $-\infty$ before softmax, which makes the weight exactly 0.
   \item The function is pure matrix multiplications and elementwise operations --- extremely GPU-friendly.
 \end{itemize}
+
+Let us run it. We reuse $Q$ and $K$ from Section~3 and define a simple $V$ where each position's value is a distinct 2D vector:
+
+\demotag
+\begin{lstlisting}
+V = torch.tensor([
+    [1.0, 0.0],  # value at position 0
+    [0.0, 1.0],  # value at position 1
+    [0.5, 0.5],  # value at position 2
+])
+
+out = attention(Q, K, V)
+print(out)
+\end{lstlisting}
+
+\outputtag
+\begin{lstlisting}
+tensor([[0.6601, 0.3399],
+        [0.3399, 0.6601],
+        [0.5000, 0.5000]])
+\end{lstlisting}
+
+Interpreting each row:
+
+\begin{itemize}
+  \item \textbf{Position 0} --- its query best matches its own key (Section~3), so it pulls mostly from $V_0 = [1, 0]$. The output $[0.66, 0.34]$ leans heavily toward $V_0$.
+  \item \textbf{Position 1} --- symmetric case. Its query best matches $K_1$, so it pulls mostly from $V_1 = [0, 1]$. The output $[0.34, 0.66]$ leans toward $V_1$.
+  \item \textbf{Position 2} --- its query matches all three keys roughly equally (scores were all~1 in Section~3), so attention is nearly uniform. The output $[0.50, 0.50]$ is close to the simple average $\frac{1}{3}(V_0 + V_1 + V_2)$.
+\end{itemize}
+
+\textbf{The big picture.} The attention output is not the final embedding --- it is a \emph{context-aware update}. In the full transformer (Document~02), this output is added back to the original embedding via a residual connection: $\mathbf{x} \leftarrow \mathbf{x} + \mathrm{Attention}(\mathbf{x})$. So each position's embedding starts as ``what this token means in isolation'' and gets enriched with ``what the surrounding context says is relevant.'' Stack multiple layers of this, and the embeddings progressively absorb more and more contextual information.
+
+\tip{Since $d_k$ equals the embedding dimension, the attention output has the same shape as the input --- $(T, d_k)$ --- so the residual add works directly.}
 
 \bigskip\hrule\bigskip
 
@@ -231,13 +268,13 @@ A single set of $Q, K, V$ projections computes a single attention pattern: one $
 
 Multi-head attention addresses this by running multiple attention computations in parallel, each with its own learned projections, and then combining the results.
 
-\textbf{The math.} Given input $X$ of shape $(T, d_{\text{model}})$, and $h$ heads:
+\textbf{The math.} We now write $d_{\text{model}}$ for the full embedding dimension (what we called $d$ in Sections~2--6). Given input $X$ of shape $(T, d_{\text{model}})$, and $h$ heads:
 
 For each head $i$ (where $i = 1, \ldots, h$):
 \[
 \text{head}_i = \mathrm{Attention}(X W_i^Q,\; X W_i^K,\; X W_i^V)
 \]
-where $W_i^Q, W_i^K, W_i^V$ are each $(d_{\text{model}}, d_k)$ projection matrices and $d_k = d_{\text{model}} / h$.
+where $W_i^Q, W_i^K, W_i^V$ are each $(d_{\text{model}}, d_k)$ projection matrices and $d_k = d_{\text{model}} / h$. Note that $d_k$ now means the \emph{per-head} dimension, smaller than the full embedding dimension we called $d_k$ in Sections~3--6.
 
 Then concatenate and project:
 \[
@@ -247,25 +284,19 @@ where $W^O$ is $(d_{\text{model}}, d_{\text{model}})$.
 
 Each head operates in a $d_k$-dimensional subspace. Head 1 might learn to attend based on syntactic structure; head 2 might attend to nearby positions; head 3 might track coreference. The output projection $W^O$ learns to combine these different views.
 
-\textbf{The efficient implementation trick.} Naively, $h$ heads require $3h$ separate matrix multiplications for the projections. We can do it with just one by concatenating all the projection matrices:
-
 The following snippets show how multi-head attention works step by step inside \code{CausalSelfAttention} in \code{src/model.py}, which we will create in Document~04.
 
 \begin{enumerate}
-  \item \textbf{Single combined projection.} Multiply $X$ by a single weight matrix $W_{qkv}$ of shape $(d_{\text{model}}, 3 \cdot d_{\text{model}})$ to produce all $Q, K, V$ for all heads at once:
+  \item \textbf{Project to Q, K, V.} Three separate weight matrices $W^Q, W^K, W^V$, each of shape $(d_{\text{model}}, d_{\text{model}})$, produce the queries, keys, and values:
 
 \concepttag
 \begin{lstlisting}
-qkv = self.c_attn(x)  # (B, T, 3 * d_model)
+q = self.W_Q(x)  # (B, T, d_model)
+k = self.W_K(x)  # (B, T, d_model)
+v = self.W_V(x)  # (B, T, d_model)
 \end{lstlisting}
 
-  \item \textbf{Split into Q, K, V}, each of shape $(B, T, d_{\text{model}})$:
-
-\begin{lstlisting}
-q, k, v = qkv.split(self.n_embd, dim=2)
-\end{lstlisting}
-
-  \item \textbf{Reshape into heads.} We reshape $(B, T, d_{\text{model}})$ into $(B, T, n_{\text{head}}, d_k)$ and then transpose to $(B, n_{\text{head}}, T, d_k)$:
+  \item \textbf{Reshape into heads.} We reshape each $(B, T, d_{\text{model}})$ tensor into $(B, T, n_{\text{head}}, d_k)$ and then transpose to $(B, n_{\text{head}}, T, d_k)$:
 
 \begin{lstlisting}
 q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
@@ -275,13 +306,23 @@ v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
 Now the tensor has shape $(B, n_{\text{head}}, T, d_k)$. The $n_{\text{head}}$ dimension acts as an additional batch dimension --- the $(T, d_k)$ attention computation runs independently for each head.
 
-  \item \textbf{Run attention.} Standard scaled dot-product attention over the last two dimensions. Each head computes its own $(T, T)$ weight matrix and its own $(T, d_k)$ output.
+  \item \textbf{Run attention.} Standard scaled dot-product attention over the last two dimensions. Each head computes its own $(T, T)$ weight matrix and its own $(T, d_k)$ output:
 
-  \item \textbf{Reassemble.} Transpose back and reshape to merge heads:
+\begin{lstlisting}
+scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(head_dim)
+weights = F.softmax(scores, dim=-1)
+y = torch.matmul(weights, v)
+\end{lstlisting}
+
+This is the same formula from Section~6, now applied per head. Section~8 adds the causal mask that restricts each position to only attend to the past.
+
+  \item \textbf{Reassemble.} After attention, \code{y} has shape $(B, n_{\text{head}}, T, d_k)$. We transpose to $(B, T, n_{\text{head}}, d_k)$ and then merge the last two dimensions back into $d_{\text{model}}$ (since $n_{\text{head}} \times d_k = d_{\text{model}}$):
 
 \begin{lstlisting}
 y = y.transpose(1, 2).contiguous().view(B, T, d_model)
 \end{lstlisting}
+
+\tip{\code{.contiguous()} is a PyTorch bookkeeping call, not a mathematical operation. \code{.transpose()} does not rearrange data in memory --- it only changes how indices map to the underlying storage. But \code{.view()} requires the data to be laid out contiguously (no gaps or out-of-order strides). \code{.contiguous()} copies the tensor into a fresh, contiguous block so that \code{.view()} can safely reinterpret the shape.}
 
   \item \textbf{Output projection.} A final linear layer mixes the concatenated head outputs:
 
@@ -290,9 +331,9 @@ y = self.c_proj(y)  # (B, T, d_model)
 \end{lstlisting}
 \end{enumerate}
 
-\textbf{Parameter count.} We have four weight matrices of shape $(d_{\text{model}}, d_{\text{model}})$: one combined QKV projection (actually $(d_{\text{model}}, 3 \cdot d_{\text{model}})$, so three matrices worth) and one output projection. Total: $4 \cdot d_{\text{model}}^2$ parameters (ignoring biases). For our BabyGPT with $d_{\text{model}} = 384$, that is $4 \times 384^2 = 589{,}824$ parameters per attention layer.
+\textbf{Parameter count.} We have four weight matrices of shape $(d_{\text{model}}, d_{\text{model}})$: $W^Q$, $W^K$, $W^V$, and the output projection $W^O$. Total: $4 \cdot d_{\text{model}}^2$ parameters (ignoring biases). For our BabyGPT with $d_{\text{model}} = 384$, that is $4 \times 384^2 = 589{,}824$ parameters per attention layer.
 
-You can see this exact implementation in \code{src/model.py} in the \code{CausalSelfAttention} class. The combined QKV projection is \code{self.c\_attn}, and the output projection is \code{self.c\_proj}. The attention computation itself is delegated to PyTorch's \code{F.scaled\_dot\_product\_attention}, which fuses the scaling, masking, softmax, and matrix multiply into a single efficient kernel (flash attention).
+You can see this exact implementation in \code{src/model.py} in the \code{CausalSelfAttention} class. The three projections are \code{self.W\_Q}, \code{self.W\_K}, \code{self.W\_V}, and the output projection is \code{self.c\_proj}. The attention computation uses the same scaling, masking, softmax, and matrix multiply from Section~6.
 
 \bigskip\hrule\bigskip
 
@@ -336,21 +377,21 @@ After masking and softmax, the weight matrix looks like:
 
 Each row sums to 1, and all entries above the diagonal are exactly 0. Every position attends only to itself and to the past.
 
-In \code{src/model.py}, we do not construct the mask manually. Instead, we pass \code{is\_causal=True} to PyTorch's \code{F.scaled\_dot\_product\_attention}:
+In \code{src/model.py}, the causal mask is constructed with \code{torch.tril} and applied before softmax, exactly as shown above:
 
 This is how it appears in the final \code{src/model.py}.
 
 \concepttag
 \begin{lstlisting}
-y = F.scaled_dot_product_attention(
-    q, k, v,
-    attn_mask=None,
-    dropout_p=self.attn_dropout.p if self.training else 0.0,
-    is_causal=True,
-)
+scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+scores = scores.masked_fill(~mask, float('-inf'))
+weights = F.softmax(scores, dim=-1)
+weights = self.attn_dropout(weights)
+y = torch.matmul(weights, v)
 \end{lstlisting}
 
-This flag tells PyTorch to apply the causal mask internally, which is more efficient --- especially when using flash attention, which never materializes the full $(T, T)$ attention matrix in memory.
+This is the complete attention computation from \code{CausalSelfAttention.forward} --- scaling, masking, softmax, dropout, and the weighted sum of values, all visible.
 
 \bigskip\hrule\bigskip
 

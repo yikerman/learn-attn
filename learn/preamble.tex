@@ -71,14 +71,14 @@
 % Standalone demo — try in a Python REPL or scratch script, not part of the project.
 \newcommand{\demotag}{%
   \par\noindent
-  \colorbox{NavyBlue!12}{\small\sffamily\bfseries Demo \textnormal{--- try in a REPL, not part of the project}}%
+  \colorbox{NavyBlue!12}{\small\sffamily\bfseries Demo \textnormal{--- try in a REPL}}%
   \nopagebreak\par\nopagebreak\vspace{-0.6em}%
 }
 
 % Pseudocode or conceptual snippet illustrating an idea.
 \newcommand{\concepttag}{%
   \par\noindent
-  \colorbox{black!6}{\small\sffamily\bfseries Conceptual \textnormal{--- illustrating the idea, not runnable as-is}}%
+  \colorbox{black!6}{\small\sffamily\bfseries Conceptual \textnormal{--- illustrating the idea}}%
   \nopagebreak\par\nopagebreak\vspace{-0.6em}%
 }
 
@@ -102,5 +102,13 @@
   \medskip\par\noindent
   \fbox{\parbox{\dimexpr\linewidth-2\fboxsep-2\fboxrule}{%
     {\sffamily\bfseries Checkpoint:} #1}}%
+  \medskip
+}
+
+% Tip — clarifies a common point of confusion.
+\newcommand{\tip}[1]{%
+  \medskip\par\noindent
+  \colorbox{ForestGreen!10}{\parbox{\dimexpr\linewidth-2\fboxsep}{%
+    {\sffamily\bfseries\color{ForestGreen!70!black} Tip:} #1}}%
   \medskip
 }

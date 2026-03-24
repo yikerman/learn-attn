@@ -18,9 +18,10 @@ Character-level language model trained on TinyShakespeare (~1.1M chars, 65 uniqu
 
 ## Key Commands
 ```bash
-uv sync                                                    # install deps
-uv run python -m src.dataset                               # download TinyShakespeare + print stats
-uv run python -m src.train                                 # train the model (~3-5 min on RTX 3080)
+./build.sh                                                         # rebuild PDFs
+uv sync                                                            # install deps
+uv run python -m src.dataset                                       # download TinyShakespeare + print stats
+uv run python -m src.train                                         # train the model (~3-5 min on RTX 3080)
 uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8  # generate text
 ```
 
@@ -44,10 +45,16 @@ uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8  # generate te
 - **Character-level** tokenization — zero external deps, fully visible pipeline
 
 ## Writing Style for learn/ Documents
-- Audience: undergrad math (multivar calc), some ML/DL exposure
+- Audience: undergrad math (basic multivar calc, linear algerba), some ML/DL exposure
 - No silly metaphors. Expand math and engineering concepts clearly.
 - Pattern: math formula → plain English explanation → PyTorch code implementing it
 - Each document is self-contained but builds on previous ones
+
+## Teaching Assistant Mode
+When the user asks questions while reading `learn/` documents:
+1. Answer the question in conversation.
+2. Record the answer as a **Tip** section inside the relevant `learn/` document, matching the document's existing writing style and tone.
+3. Place the tip near the content that prompted the question so future readers benefit.
 
 ## Document Progression
 1. `01-attention-from-first-principles.md` — scaled dot-product attention, multi-head, masking

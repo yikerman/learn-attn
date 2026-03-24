@@ -253,9 +253,9 @@ Let us count every trainable parameter in the model.
 
 \textbf{Per transformer block:}
 
-The attention sublayer has one combined QKV projection and one output projection:
+The attention sublayer has three Q, K, V projections and one output projection:
 \begin{itemize}
-  \item \code{c\_attn} (QKV combined): $384 \times (3 \times 384) = 384 \times 1152 = 442{,}368$
+  \item \code{W\_Q}, \code{W\_K}, \code{W\_V}: $3 \times (384 \times 384) = 3 \times 147{,}456 = 442{,}368$
   \item \code{c\_proj} (output): $384 \times 384 = 147{,}456$
   \item Total attention weights: $442{,}368 + 147{,}456 = 589{,}824$
 \end{itemize}
@@ -356,7 +356,7 @@ Create \code{src/model.py} containing all the classes we have discussed: \code{L
 # See the project's src/model.py for the complete implementation.
 # It contains, in order:
 #   - LayerNorm          (Document 02)
-#   - CausalSelfAttention (Document 01, Section 6-7)
+#   - CausalSelfAttention (Document 01, Sections 7--8)
 #   - FeedForward        (Document 02, Section 4)
 #   - TransformerBlock   (Document 02, Section 5)
 #   - BabyGPT            (this document, "Our BabyGPT Architecture")
