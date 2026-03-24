@@ -324,15 +324,15 @@ These are exactly the insights behind the GPT scaling papers. The architecture w
 
 \bigskip
 
-This concludes the six-document series. The full pipeline --- from the attention mechanism to a trained, generating language model --- is implemented in \code{src/} and explained in \code{learn/}.
+This concludes the six-document series. The full pipeline --- from the attention mechanism to a trained, generating language model --- is implemented in \code{src/}.
 
 \section{Project Summary}
 
 At this point your project directory should contain:
 
 \begin{verbatim}
-learn-attn/
-  pyproject.toml
+learn-attn-code/
+  pyproject.toml, ... uv files
   src/
     __init__.py
     config.py       (Document 04)
@@ -345,8 +345,6 @@ learn-attn/
     tinyshakespeare.txt  (downloaded by src/dataset.py)
   checkpoints/
     best.pt         (saved by src/train.py)
-  learn/
-    01-06 .tex/.pdf (these documents)
 \end{verbatim}
 
 The model is 10.7M parameters, trained on 1MB of Shakespeare, generating character-level text. The same architecture --- with more parameters, subword tokenization, and more data --- is what powers GPT-2, GPT-3, and their successors.

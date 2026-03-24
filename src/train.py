@@ -58,7 +58,7 @@ def configure_optimizer(model: BabyGPT) -> torch.optim.AdamW:
     """Set up AdamW with separate parameter groups for weight decay.
 
     Weight matrices get decayed; biases, layer norm params, and embeddings don't.
-    This is standard practice — weight decay on biases/norms doesn't help and
+    This is standard practice -- weight decay on biases/norms doesn't help and
     can hurt.
     """
     decay_params = []

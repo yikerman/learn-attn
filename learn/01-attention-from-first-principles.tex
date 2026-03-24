@@ -8,12 +8,12 @@ Before we begin, create the project and install PyTorch:
 
 \shelltag
 \begin{lstlisting}[language=bash]
-mkdir learn-attn && cd learn-attn
+mkdir learn-attn-impl && cd learn-attn-impl
 uv init
-uv add torch --index https://download.pytorch.org/whl/cu126
+uv add torch
 \end{lstlisting}
 
-This gives you a Python environment with PyTorch and CUDA support. All demo code in Documents 01--03 can be run in a Python REPL (\code{uv run python}). Starting in Document 04, we will create the actual project source files.
+This gives you a Python environment with PyTorch (and the documents assume a CUDA device present). All demo code in Documents 01--03 can be run in a Python REPL (\code{uv run python}). Starting in Document 04, we will create the actual project source files.
 
 \checkpoint{Run \code{uv run python -c "import torch; print(torch.cuda.is\_available())"} --- it should print \code{True}.}
 

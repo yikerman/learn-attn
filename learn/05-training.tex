@@ -24,6 +24,10 @@ class CharTokenizer:
         self.char_to_idx = {ch: i for i, ch in enumerate(chars)}
         self.idx_to_char = {i: ch for i, ch in enumerate(chars)}
 
+    @property
+    def vocab_size(self) -> int:
+        return len(self.char_to_idx)
+
     def encode(self, text: str) -> list[int]:
         return [self.char_to_idx[ch] for ch in text]
 
@@ -33,9 +37,148 @@ class CharTokenizer:
 
 Encoding is a character-by-character lookup. Decoding is the reverse. That is the entire tokenizer.
 
-\subsection{Comparison with Subword Tokenization (BPE)}
+\subsection{Byte Pair Encoding (BPE)}
 
-Production language models use \textbf{Byte Pair Encoding (BPE)} or similar subword tokenization schemes. BPE starts with individual characters (or bytes) and iteratively merges the most frequent pair of adjacent tokens into a new token. After many merges, the vocabulary contains common words as single tokens, rare words as sequences of subword pieces, and characters as a fallback.
+Production language models do not tokenize character by character. They use \textbf{Byte Pair Encoding (BPE)} (Sennrich et al., 2016), a subword tokenization algorithm that finds a vocabulary of variable-length tokens by greedily merging frequent character pairs. The result sits between character-level and word-level tokenization: common words become single tokens, rare words are split into recognizable pieces, and any string can be represented.
+
+\subsubsection{The training algorithm}
+
+BPE learns its vocabulary from a training corpus. The algorithm is simple: start with a vocabulary of individual characters, then repeatedly merge the most frequent adjacent pair.
+
+\begin{enumerate}
+  \item \textbf{Initialize.} Split every word in the corpus into a sequence of characters. The initial vocabulary is the set of all unique characters.
+  \item \textbf{Count pairs.} For every adjacent pair of tokens in every word, count how many times that pair appears across the entire corpus.
+  \item \textbf{Merge the top pair.} Find the pair with the highest count. Create a new token by concatenating the two tokens in the pair. Replace every occurrence of that pair in the corpus with the new token. Add the new token to the vocabulary.
+  \item \textbf{Repeat.} Go back to step 2. Stop after a predetermined number of merges (this controls the final vocabulary size).
+\end{enumerate}
+
+Pseudocode:
+
+\concepttag
+\begin{lstlisting}
+def train_bpe(corpus: list[list[str]], num_merges: int) -> list[tuple[str, str]]:
+    """Learn BPE merge rules from a tokenized corpus.
+
+    corpus: list of words, each word is a list of character tokens.
+            e.g. [["l","o","w"], ["l","o","w","e","r"], ...]
+    Returns: ordered list of merge rules [(pair_a, pair_b), ...].
+    """
+    merges = []
+
+    for i in range(num_merges):
+        # Count every adjacent pair across all words
+        pair_counts = {}
+        for word in corpus:
+            for j in range(len(word) - 1):
+                pair = (word[j], word[j + 1])
+                pair_counts[pair] = pair_counts.get(pair, 0) + 1
+
+        if not pair_counts:
+            break
+
+        # Find the most frequent pair
+        best_pair = max(pair_counts, key=pair_counts.get)
+        merges.append(best_pair)
+
+        # Merge: replace every occurrence of best_pair with a new token
+        new_token = best_pair[0] + best_pair[1]
+        for word in corpus:
+            k = 0
+            while k < len(word) - 1:
+                if (word[k], word[k + 1]) == best_pair:
+                    word[k:k + 2] = [new_token]
+                else:
+                    k += 1
+
+    return merges
+\end{lstlisting}
+
+\subsubsection{Worked example}
+
+Suppose the training corpus contains these words with their frequencies:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Word (as characters) & Frequency \\
+\midrule
+\texttt{l o w} & 5 \\
+\texttt{l o w e r} & 2 \\
+\texttt{n e w e s t} & 6 \\
+\texttt{w i d e s t} & 3 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Initial vocabulary: $\{\texttt{d}, \texttt{e}, \texttt{i}, \texttt{l}, \texttt{n}, \texttt{o}, \texttt{r}, \texttt{s}, \texttt{t}, \texttt{w}\}$ (10 tokens).
+
+\textbf{Merge 1.} Count all adjacent pairs (weighted by word frequency):
+
+\begin{center}
+\begin{tabular}{lllllllll}
+\texttt{(e,s)} = 9 &
+\texttt{(s,t)} = 9 &
+\texttt{(l,o)} = 7 &
+\texttt{(o,w)} = 7 &
+\texttt{(n,e)} = 6 &
+\texttt{(e,w)} = 6 &
+$\ldots$
+\end{tabular}
+\end{center}
+
+Tie between \texttt{(e,s)} and \texttt{(s,t)} at 9. Pick \texttt{(e,s)}. Merge into \texttt{es}. The corpus becomes:
+
+\begin{center}
+\texttt{l o w} (5), \quad \texttt{l o w e r} (2), \quad \texttt{n e w es t} (6), \quad \texttt{w i d es t} (3)
+\end{center}
+
+Vocabulary: 11 tokens (added \texttt{es}).
+
+\textbf{Merge 2.} Now \texttt{(es,t)} appears $6 + 3 = 9$ times --- highest. Merge into \texttt{est}:
+
+\begin{center}
+\texttt{l o w} (5), \quad \texttt{l o w e r} (2), \quad \texttt{n e w est} (6), \quad \texttt{w i d est} (3)
+\end{center}
+
+\textbf{Merge 3.} \texttt{(l,o)} appears 7 times. Merge into \texttt{lo}:
+
+\begin{center}
+\texttt{lo w} (5), \quad \texttt{lo w e r} (2), \quad \texttt{n e w est} (6), \quad \texttt{w i d est} (3)
+\end{center}
+
+After more merges, common subwords like \texttt{low}, \texttt{new}, \texttt{est} become single tokens. Rare combinations stay as smaller pieces.
+
+\subsubsection{Encoding new text}
+
+Once the merge rules are learned, encoding a new string applies the same merges in order:
+
+\concepttag
+\begin{lstlisting}
+def encode_bpe(text: str, merges: list[tuple[str, str]]) -> list[str]:
+    """Encode a string using learned BPE merge rules.
+
+    Start with individual characters, then apply each merge rule
+    in the order it was learned.
+    """
+    tokens = list(text)          # start as characters
+    for pair in merges:
+        new_token = pair[0] + pair[1]
+        i = 0
+        while i < len(tokens) - 1:
+            if (tokens[i], tokens[i + 1]) == pair:
+                tokens[i:i + 2] = [new_token]
+            else:
+                i += 1
+    return tokens
+\end{lstlisting}
+
+For example, with the merges above, \texttt{"lowest"} encodes as \texttt{["low", "est"]} --- two tokens instead of six characters.
+
+\subsubsection{Byte-level BPE (GPT-2)}
+
+GPT-2 uses a variant called \textbf{byte-level BPE}. Instead of starting with Unicode characters, the base vocabulary is all 256 individual bytes (\texttt{0x00} through \texttt{0xFF}). This guarantees that any input --- including Unicode, emojis, or arbitrary binary data --- can be tokenized without an ``unknown token'' fallback. GPT-2 performs approximately 50,000 merges, yielding a vocabulary of about 50,257 tokens.
+
+\subsubsection{Why we use character-level instead}
 
 \begin{center}
 \begin{tabular}{llll}
@@ -89,7 +232,66 @@ def __getitem__(self, idx):
     return x, y
 \end{lstlisting}
 
-Every position in \code{x} provides a training example. Position 0 must predict position 1 (using only token 0 as context). Position 1 must predict position 2 (using tokens 0 and 1). Position 255 must predict position 256 (using all 256 tokens of context). A single \code{(x, y)} pair gives us 256 next-token prediction examples.
+The dataset generates examples by \textbf{striding with step size 1}: item 0 starts at position 0, item 1 starts at position 1, item 2 at position 2, and so on. Consecutive items overlap by 256 of 257 tokens. This means almost every token in the corpus appears as a target in many different contexts.
+
+\begin{center}
+\begin{tikzpicture}[
+    token/.style={draw, minimum width=0.55cm, minimum height=0.5cm, font=\scriptsize\ttfamily, inner sep=0pt},
+    lbl/.style={font=\scriptsize\sffamily},
+]
+% Corpus tokens
+\node[lbl] at (-1.3, 0) {corpus:};
+\foreach \i/\c in {0/F,1/i,2/r,3/s,4/t,5/\space,6/C,7/i,8/t,9/i,10/z,11/e,12/n} {
+    \node[token] (c\i) at (\i*0.55, 0) {\c};
+}
+\node[font=\scriptsize] at (13*0.55+0.3, 0) {$\cdots$};
+
+% Item 0
+\node[lbl] at (-1.3, -0.8) {item 0:};
+\draw[thick, NavyBlue] (-0.275, -0.55) rectangle (4*0.55+0.275, -1.05);
+\node[lbl, NavyBlue] at (4*0.55+0.7, -0.8) {$\rightarrow$};
+\node[lbl, NavyBlue] at (2*0.55, -0.8) {\texttt{x}: [F,i,r,s,t]};
+
+% Item 1
+\node[lbl] at (-1.3, -1.5) {item 1:};
+\draw[thick, red!70!black] (0.55-0.275, -1.25) rectangle (5*0.55+0.275, -1.75);
+\node[lbl, red!70!black] at (3*0.55, -1.5) {\texttt{x}: [i,r,s,t,\textvisiblespace]};
+
+% Item 2
+\node[lbl] at (-1.3, -2.2) {item 2:};
+\draw[thick, green!50!black] (2*0.55-0.275, -1.95) rectangle (6*0.55+0.275, -2.45);
+\node[lbl, green!50!black] at (4*0.55, -2.2) {\texttt{x}: [r,s,t,\textvisiblespace,C]};
+
+\node[font=\scriptsize] at (2*0.55, -2.9) {$\vdots$};
+
+% Caption
+\node[lbl, gray, text width=9cm, align=center] at (3.5, -3.4) {stride = 1: each item shifts the window by one token};
+\end{tikzpicture}
+\end{center}
+
+The total number of items is \code{len(data) - block\_size}. For the training split: $1{,}003{,}854 - 256 = 1{,}003{,}598$ overlapping windows. The \code{DataLoader} shuffles these and draws batches of 64.
+
+Every position in \code{x} provides a training signal. Position 0 must predict position 1 (using only token 0 as context). Position 255 must predict position 256 (using all 256 tokens of context). A single \code{(x, y)} pair gives us 256 next-token prediction examples.
+
+\textbf{Inspecting a training sample.} You can decode a sample back to text to see exactly what the model trains on:
+
+\demotag
+\begin{lstlisting}
+text = download_data()
+tok = CharTokenizer(text)
+data = torch.tensor(tok.encode(text), dtype=torch.long)
+ds = ShakespeareDataset(data, block_size=256)
+
+x, y = ds[0]                           # first training item
+print("Input: ", tok.decode(x.tolist()[:40]))   # first 40 chars of x
+print("Target:", tok.decode(y.tolist()[:40]))   # first 40 chars of y
+
+# Output:
+# Input:  First Citizen:\nBefore we proceed any
+# Target: irst Citizen:\nBefore we proceed any f
+\end{lstlisting}
+
+The target is the input shifted by one character --- at every position, the model learns to predict the next character.
 
 \textbf{4. DataLoader.} Standard PyTorch DataLoader wraps the dataset:
 
@@ -124,10 +326,7 @@ from torch.utils.data import Dataset, DataLoader
 from src.tokenizer import CharTokenizer
 from src.config import GPTConfig
 
-DATA_URL = (
-    "https://raw.githubusercontent.com/karpathy/char-rnn/"
-    "master/data/tinyshakespeare/input.txt"
-)
+DATA_URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_FILE = DATA_DIR / "tinyshakespeare.txt"
 
@@ -145,11 +344,12 @@ def download_data() -> str:
 
 
 class ShakespeareDataset(Dataset):
-    """Yields (x, y) pairs for next-token prediction (Section 2).
+    """Yields (x, y) pairs where x = chunk[:-1] and y = chunk[1:].
 
-    Each sample: a contiguous slice of block_size+1 tokens.
-    x = chunk[:-1] (input), y = chunk[1:] (target, shifted by 1).
-    One (x, y) pair gives block_size training examples.
+    Each sample is a contiguous slice of block_size+1 characters from the
+    encoded text. The input x is the first block_size tokens; the target y
+    is the same window shifted right by one position. Every position in x
+    provides one next-token prediction training example.
     """
 
     def __init__(self, data: torch.Tensor, block_size: int):
@@ -162,7 +362,7 @@ class ShakespeareDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         chunk = self.data[idx : idx + self.block_size + 1]
         x = chunk[:-1]  # (block_size,)
-        y = chunk[1:]    # (block_size,)
+        y = chunk[1:]   # (block_size,)
         return x, y
 
 
@@ -175,8 +375,10 @@ def get_dataloaders(
     text = download_data()
     tokenizer = CharTokenizer(text)
 
+    # Encode entire text as a single long tensor
     data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
 
+    # 90/10 train/val split
     split = int(0.9 * len(data))
     train_data = data[:split]
     val_data = data[split:]
@@ -226,155 +428,78 @@ uv run python -m src.dataset
 
 \section{The Optimizer: AdamW}
 
-\subsection{Starting from SGD}
+AdamW (Loshchilov \& Hutter, 2019) is the standard optimizer for transformer training. It combines two ideas:
 
-The simplest optimization algorithm is stochastic gradient descent. Given the gradient $g_t$ of the loss with respect to parameters $\theta$ at step $t$:
-
-\[\theta_{t+1} = \theta_t - \alpha \cdot g_t\]
-
-where $\alpha$ is the learning rate. Two problems: (1) all parameters share the same learning rate, even though different parameters may need very different step sizes; (2) stochastic gradients are noisy (computed on a minibatch, not the full dataset), so each individual update may point in a suboptimal direction.
-
-\subsection{Momentum}
-
-Maintain a running average of past gradients, called the momentum buffer:
-
-\[m_t = \beta_1 \cdot m_{t-1} + (1 - \beta_1) \cdot g_t\]
-
-\[\theta_{t+1} = \theta_t - \alpha \cdot m_t\]
-
-This exponential moving average smooths out noise. If gradients consistently point in the same direction, the momentum builds up and the effective step size increases. If gradients oscillate, momentum dampens the oscillation. Typical value: $\beta_1 = 0.9$.
-
-\subsection{Adam (Adaptive Moment Estimation)}
-
-Adam maintains two running averages --- the first moment (mean of gradients) and the second moment (mean of squared gradients):
-
-\[m_t = \beta_1 \cdot m_{t-1} + (1 - \beta_1) \cdot g_t\]
-
-\[v_t = \beta_2 \cdot v_{t-1} + (1 - \beta_2) \cdot g_t^2\]
-
-Since $m_0 = 0$ and $v_0 = 0$, the early estimates are biased toward zero. Bias correction compensates:
-
-\[\hat{m}_t = \frac{m_t}{1 - \beta_1^t}, \qquad \hat{v}_t = \frac{v_t}{1 - \beta_2^t}\]
+\begin{enumerate}
+  \item \textbf{Adaptive learning rates.} Each parameter gets its own effective learning rate based on the history of its gradients. Parameters with consistently large gradients receive smaller updates; parameters with small gradients receive larger updates. This is the Adam part.
+  \item \textbf{Decoupled weight decay.} Weight matrices are shrunk toward zero by a fixed fraction each step ($\alpha \lambda$), independent of the gradient history. This regularization prevents any single weight from growing too large. The ``decoupled'' means the decay is applied separately from the adaptive gradient step, which is the key difference from naively adding L2 regularization to Adam.
+\end{enumerate}
 
 The update rule:
 
-\[\theta_{t+1} = \theta_t - \alpha \cdot \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon}\]
-
-The division by $\sqrt{\hat{v}_t}$ gives each parameter its own effective learning rate. Parameters with consistently large gradients (high $\hat{v}_t$) get smaller updates. Parameters with small gradients get larger updates. This per-parameter adaptation is what makes Adam work well across a wide range of architectures without careful learning rate tuning.
-
-Typical values: $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-8}$.
-
-\subsection{AdamW: Decoupled Weight Decay}
-
-Weight decay is a regularization technique that pushes weights toward zero, preventing the model from relying too heavily on any single parameter. The idea is to add a penalty proportional to the magnitude of the weights.
-
-\textbf{Adam with L2 regularization (the wrong way):} Add $\lambda \theta$ to the gradient before applying the adaptive scaling:
-
-\[g_t' = g_t + \lambda \theta_t\]
-
-Then use $g_t'$ in the Adam update. The problem: the L2 term $\lambda \theta_t$ gets divided by $\sqrt{\hat{v}_t}$ just like the actual gradient. For parameters with large gradients (high $\hat{v}_t$), the regularization effect is weakened. The decay is no longer uniform --- it depends on the gradient history, which is not the intended behavior.
-
-\textbf{AdamW (the right way, Loshchilov \& Hutter, 2019):} Apply the gradient update and the weight decay as two separate operations:
-
 \[\theta_{t+1} = \theta_t - \alpha \cdot \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon} - \alpha \cdot \lambda \cdot \theta_t\]
 
-The weight decay term $\alpha \lambda \theta_t$ is subtracted directly, bypassing the adaptive scaling. Every parameter is decayed by the same fraction $\alpha \lambda$ per step, regardless of its gradient magnitude.
+where $\hat{m}_t$ is the bias-corrected moving average of gradients (momentum), $\hat{v}_t$ is the bias-corrected moving average of squared gradients (adaptive scaling), and $\lambda$ is the weight decay coefficient.
 
-\subsection{Parameter Groups}
-
-Not all parameters should be decayed. Weight matrices benefit from decay --- it prevents any single connection from becoming too dominant. But biases, LayerNorm parameters, and embeddings should not be pushed toward zero: biases are offsets that need to be whatever value is correct, and LayerNorm parameters control the scale and shift of normalized activations.
-
-Our \code{configure\_optimizer} function in \code{src/train.py} separates parameters into two groups:
-
-\concepttag
-{\small\itshape From \code{configure\_optimizer} in \code{src/train.py}.}
-\begin{lstlisting}
-for name, param in model.named_parameters():
-    if param.dim() < 2:       # biases, LayerNorm weights (1D tensors)
-        no_decay_params.append(param)
-    else:                      # weight matrices (2D tensors)
-        decay_params.append(param)
-
-optim_groups = [
-    {"params": decay_params, "weight_decay": 0.1},
-    {"params": no_decay_params, "weight_decay": 0.0},
-]
-\end{lstlisting}
-
-The heuristic is simple: 1D parameters (biases, norm weights) get no decay; 2D parameters (weight matrices) get decay. This covers all the cases correctly for our architecture.
-
-\subsection{Our Settings}
+Not all parameters should be decayed. Weight matrices (2D tensors) get decay; biases and LayerNorm parameters (1D tensors) do not --- they are offsets and scales that should be free to take whatever value is correct.
 
 \begin{center}
 \begin{tabular}{ll}
 \toprule
 Parameter & Value \\
 \midrule
-Learning rate & $1 \times 10^{-3}$ \\
-$\beta_1$ & 0.9 \\
-$\beta_2$ & 0.99 \\
-Weight decay & 0.1 \\
+Learning rate ($\alpha$) & $1 \times 10^{-3}$ \\
+$\beta_1$ (momentum) & 0.9 \\
+$\beta_2$ (adaptive scaling) & 0.99 \\
+Weight decay ($\lambda$) & 0.1 (2D params only) \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-Note: we use $\beta_2 = 0.99$ rather than the default $0.999$. The smaller value makes the second moment estimate adapt faster to changes in gradient magnitude, which works better for language model training.
-
 \section{Learning Rate Schedule: Cosine Annealing with Warmup}
 
-The learning rate is not constant during training. It follows a two-phase schedule.
+The learning rate follows a two-phase schedule: linear warmup, then cosine decay.
 
-\subsection{Phase 1: Linear Warmup (Steps 0 to 100)}
+\textbf{Warmup} (steps 0--100): $\text{lr}(t) = \text{max\_lr} \cdot t \,/\, \text{warmup\_iters}$. The learning rate ramps linearly from 0 to the maximum. This gives AdamW's moment estimates time to stabilize before the optimizer takes large steps.
 
-The learning rate increases linearly from 0 to the maximum learning rate:
+\textbf{Cosine decay} (steps 100--5000):
+\[\text{lr}(t) = \text{min\_lr} + \tfrac{1}{2}(\text{max\_lr} - \text{min\_lr})\bigl(1 + \cos(\pi \cdot \text{progress})\bigr)\]
+where $\text{progress} = (t - \text{warmup\_iters}) / (\text{decay\_iters} - \text{warmup\_iters})$ goes from 0 to 1. The cosine curve spends more time near the maximum early on (when the model is making large progress) and near the minimum late in training (when fine adjustments matter).
 
-\[\text{lr}(t) = \text{max\_lr} \cdot \frac{t}{\text{warmup\_iters}}\]
-
-Why warmup is necessary: at the start of training, the model's parameters are random. The loss landscape is chaotic --- gradients are large and point in unpredictable directions. Adam's moment estimates $m_t$ and $v_t$ are initialized to zero and have not yet converged to meaningful values. If you start with a large learning rate, the optimizer takes large steps based on unreliable gradient estimates, which can cause the loss to diverge.
-
-Warmup lets the moment estimates stabilize before the learning rate reaches its full value. By step 100, $m_t$ and $v_t$ have accumulated enough gradient history to provide reliable per-parameter scaling.
-
-\subsection{Phase 2: Cosine Decay (Steps 100 to 5000)}
-
-After warmup, the learning rate decreases following a cosine curve:
-
-\[\text{lr}(t) = \text{min\_lr} + \frac{1}{2}(\text{max\_lr} - \text{min\_lr})\left(1 + \cos\left(\pi \cdot \text{progress}\right)\right)\]
-
-where $\text{progress} = (t - \text{warmup\_iters}) / (\text{decay\_iters} - \text{warmup\_iters})$ goes from 0 to 1.
-
-At progress = 0, the cosine term is $1 + \cos(0) = 2$, so lr = max\_lr. At progress = 1, the cosine term is $1 + \cos(\pi) = 0$, so lr = min\_lr. The decay is smooth and gradual --- the learning rate decreases slowly at first, faster in the middle, and slowly again near the end.
-
-Why cosine: compared to step decay (sudden drops at fixed intervals), cosine annealing avoids abrupt jumps that can destabilize training. Compared to linear decay, the cosine curve spends more time near the maximum learning rate early on (when the model is still making large progress) and near the minimum late in training (when fine adjustments matter more).
-
-The original ``Attention Is All You Need'' paper uses a different schedule: $\text{lr} = d_{\text{model}}^{-0.5} \cdot \min(t^{-0.5}, t \cdot \text{warmup}^{-1.5})$. This is inverse square root decay after warmup. Cosine annealing with warmup has become the modern standard, used in GPT-2, GPT-3, and most subsequent work.
-
-Here is the implementation from \code{src/train.py}:
-
-\concepttag
-{\small\itshape From \code{get\_lr} in \code{src/train.py}.}
-\begin{lstlisting}
-def get_lr(step: int) -> float:
-    # Linear warmup
-    if step < WARMUP_ITERS:
-        return LEARNING_RATE * step / WARMUP_ITERS
-    # After decay period, stay at min
-    if step > LR_DECAY_ITERS:
-        return MIN_LR
-    # Cosine decay
-    progress = (step - WARMUP_ITERS) / (LR_DECAY_ITERS - WARMUP_ITERS)
-    coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
-    return MIN_LR + coeff * (LEARNING_RATE - MIN_LR)
-\end{lstlisting}
-
-The learning rate is set manually at each step by writing to the optimizer's parameter groups:
-
-\concepttag
-{\small\itshape From \code{get\_lr} in \code{src/train.py}.}
-\begin{lstlisting}
-lr = get_lr(step)
-for param_group in optimizer.param_groups:
-    param_group["lr"] = lr
-\end{lstlisting}
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.8\linewidth,
+    height=5.5cm,
+    xlabel={Training step},
+    ylabel={Learning rate},
+    xmin=0, xmax=5200,
+    ymin=0, ymax=1.15e-3,
+    axis lines=left,
+    grid=major,
+    grid style={gray!30},
+    ytick={0, 2e-4, 4e-4, 6e-4, 8e-4, 1e-3},
+    yticklabels={$0$, $2{\times}10^{-4}$, $4{\times}10^{-4}$, $6{\times}10^{-4}$, $8{\times}10^{-4}$, $10^{-3}$},
+    xtick={0, 100, 1000, 2000, 3000, 4000, 5000},
+    every axis plot/.append style={thick},
+    legend pos=north east,
+    legend style={font=\small},
+]
+% Warmup: linear from 0 to 1e-3 over steps 0..100
+\addplot[NavyBlue, domain=0:100, samples=50]
+    {1e-3 * x / 100};
+% Cosine decay: from 1e-3 to 1e-4 over steps 100..5000
+% progress = (x-100)/(5000-100) = (x-100)/4900
+% lr = 1e-4 + 0.5*(1e-3 - 1e-4)*(1 + cos(pi * progress))
+% cos needs degrees in pgfplots: cos(deg(...))
+\addplot[NavyBlue, domain=100:5000, samples=300]
+    {1e-4 + 0.5 * (1e-3 - 1e-4) * (1 + cos(deg(pi * (x - 100) / 4900)))};
+% Annotations
+\draw[gray, dashed, thin] (axis cs:100,0) -- (axis cs:100,1e-3);
+\node[font=\scriptsize, anchor=south west] at (axis cs:110,1.02e-3) {warmup ends};
+\end{axis}
+\end{tikzpicture}
+\end{center}
 
 \section{The Training Loop}
 
@@ -503,6 +628,7 @@ Create \code{src/train.py} with the complete training script:
 
 import argparse
 import math
+import os
 import time
 from pathlib import Path
 
@@ -512,7 +638,9 @@ from src.config import GPTConfig
 from src.dataset import get_dataloaders
 from src.model import BabyGPT
 
-# ---- Hyperparameters ----
+# ---------------------------------------------------------------------------
+# Hyperparameters
+# ---------------------------------------------------------------------------
 BATCH_SIZE = 64
 MAX_ITERS = 5000
 EVAL_INTERVAL = 250
@@ -532,49 +660,62 @@ CHECKPOINT_DIR = Path(__file__).resolve().parent.parent / "checkpoints"
 
 
 def get_lr(step: int) -> float:
-    """Cosine annealing with linear warmup (Section 4).
+    """Cosine annealing with linear warmup.
 
-    Warmup: lr = max_lr * step / warmup_iters
-    Decay:  lr = min_lr + 0.5*(max_lr - min_lr)*(1 + cos(pi * progress))
+    - Warmup: linear ramp from 0 to LEARNING_RATE over WARMUP_ITERS steps.
+    - Cosine decay: smoothly decrease from LEARNING_RATE to MIN_LR.
+
+    Math: lr = min_lr + 0.5 * (max_lr - min_lr) * (1 + cos(pi * progress))
+    where progress goes from 0 to 1 over the decay phase.
     """
+    # Linear warmup
     if step < WARMUP_ITERS:
         return LEARNING_RATE * step / WARMUP_ITERS
+    # After decay period, stay at min
     if step > LR_DECAY_ITERS:
         return MIN_LR
+    # Cosine decay
     progress = (step - WARMUP_ITERS) / (LR_DECAY_ITERS - WARMUP_ITERS)
     coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
     return MIN_LR + coeff * (LEARNING_RATE - MIN_LR)
 
 
 def configure_optimizer(model: BabyGPT) -> torch.optim.AdamW:
-    """AdamW with separate parameter groups for weight decay (Section 3).
+    """Set up AdamW with separate parameter groups for weight decay.
 
-    AdamW: theta -= lr * m_hat/sqrt(v_hat+eps) - lr * lambda * theta
-    2D params (weight matrices) get decay; 1D params (biases, norms) don't.
+    Weight matrices get decayed; biases, layer norm params, and embeddings don't.
+    This is standard practice -- weight decay on biases/norms doesn't help and
+    can hurt.
     """
     decay_params = []
     no_decay_params = []
+
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
+        # Don't decay 1D parameters (biases, layer norm weights)
         if param.dim() < 2:
             no_decay_params.append(param)
         else:
             decay_params.append(param)
+
     optim_groups = [
         {"params": decay_params, "weight_decay": WEIGHT_DECAY},
         {"params": no_decay_params, "weight_decay": 0.0},
     ]
+
     return torch.optim.AdamW(optim_groups, lr=LEARNING_RATE, betas=(BETA1, BETA2))
 
 
 @torch.no_grad()
-def estimate_loss(model, train_loader, val_loader, device, eval_iters=EVAL_ITERS):
-    """Estimate train/val loss by averaging over eval_iters batches (Section 5).
-
-    Runs model.eval() (disables dropout), no gradient tracking.
-    Returns {"train": avg_loss, "val": avg_loss}.
-    """
+def estimate_loss(
+    model: BabyGPT,
+    train_loader: torch.utils.data.DataLoader,
+    val_loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    eval_iters: int = EVAL_ITERS,
+) -> dict[str, float]:
+    """Estimate train and val loss by averaging over eval_iters batches."""
     model.eval()
     out = {}
     for split, loader in [("train", train_loader), ("val", val_loader)]:
@@ -594,41 +735,53 @@ def estimate_loss(model, train_loader, val_loader, device, eval_iters=EVAL_ITERS
     return out
 
 
-def train(args):
+def train(args: argparse.Namespace) -> None:
+    # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name()}")
 
+    # Seed
     torch.manual_seed(42)
     if device.type == "cuda":
         torch.cuda.manual_seed(42)
 
+    # Data
     config = GPTConfig()
     train_loader, val_loader, tokenizer = get_dataloaders(
         config, batch_size=BATCH_SIZE
     )
+    # Update vocab_size from actual data
     config.vocab_size = tokenizer.vocab_size
     print(f"Vocab size: {config.vocab_size}")
 
+    # Model
     model = BabyGPT(config).to(device)
     print(f"Model parameters: {model.count_parameters():,}")
 
+    # Optimizer
     optimizer = configure_optimizer(model)
 
+    # Mixed precision
     use_amp = device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    amp_dtype = torch.float16  # RTX 3080 supports bf16 too, but fp16 is safe default
 
+    # Training loop
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     best_val_loss = float("inf")
+
     train_iter = iter(train_loader)
     t0 = time.time()
 
     for step in range(args.max_iters):
+        # Set learning rate for this step
         lr = get_lr(step)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
+        # Get batch (cycle through loader)
         try:
             x, y = next(train_iter)
         except StopIteration:
@@ -636,27 +789,34 @@ def train(args):
             x, y = next(train_iter)
         x, y = x.to(device), y.to(device)
 
-        with torch.amp.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+        # Forward + backward with mixed precision
+        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
             _, loss = model(x, y)
 
         scaler.scale(loss).backward()
+
+        # Gradient clipping (unscale first for correct norm computation)
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
 
+        # Logging and evaluation
         if step % EVAL_INTERVAL == 0 or step == args.max_iters - 1:
             losses = estimate_loss(model, train_loader, val_loader, device)
             elapsed = time.time() - t0
-            tok_s = (step + 1) * BATCH_SIZE * config.block_size / elapsed
+            tokens_per_sec = (step + 1) * BATCH_SIZE * config.block_size / elapsed
             print(
                 f"step {step:5d} | "
                 f"train loss {losses['train']:.4f} | "
                 f"val loss {losses['val']:.4f} | "
                 f"lr {lr:.2e} | "
-                f"tok/s {tok_s:.0f}"
+                f"tok/s {tokens_per_sec:.0f}"
             )
+
+            # Save best checkpoint
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
                 checkpoint = {
@@ -669,6 +829,7 @@ def train(args):
                 torch.save(checkpoint, CHECKPOINT_DIR / "best.pt")
                 print(f"  -> saved checkpoint (val_loss={best_val_loss:.4f})")
 
+    # Save final checkpoint
     checkpoint = {
         "model": model.state_dict(),
         "config": config,
@@ -685,7 +846,7 @@ def train(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train BabyGPT")
+    parser = argparse.ArgumentParser(description="Train BabyGPT on TinyShakespeare")
     parser.add_argument("--max-iters", type=int, default=MAX_ITERS)
     args = parser.parse_args()
     train(args)
@@ -700,7 +861,9 @@ if __name__ == "__main__":
 uv run python -m src.train
 \end{lstlisting}
 
-\checkpoint{Training takes about 3--5 minutes on an RTX 3080. You should see the loss drop from $\sim$4.17 to a best validation loss around 1.3--1.5. The best checkpoint is saved to \code{checkpoints/best.pt}.}
+\checkpoint{On an RTX 3080 (10\,GB VRAM), training takes approximately \textbf{13 minutes} for 5000 iterations at \textbf{\textasciitilde{}103K tokens/sec}, using \textbf{\textasciitilde{}3.3\,GB peak VRAM} with mixed precision. You should see the loss drop from $\sim$4.17 to a best validation loss around \textbf{1.3--1.5}. The best checkpoint is saved to \code{checkpoints/best.pt}.
+
+Note: our implementation hand-rolls LayerNorm and attention using plain PyTorch operations rather than calling optimized fused kernels (e.g.\ \code{F.scaled\_dot\_product\_attention}, \code{F.layer\_norm}). This is intentional --- seeing the raw matrix operations is the point of this project --- but it means training is slower than an optimized implementation would be. A production codebase using fused kernels and FlashAttention would train the same model significantly faster.}
 
 \section{Hyperparameters Summary}
 
