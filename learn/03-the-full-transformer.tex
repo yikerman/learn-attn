@@ -37,6 +37,8 @@ Input Tokens -> Embedding + Positional Encoding
     -> Encoder Output (B, T_src, d_model)
 \end{verbatim}
 
+$B$ is the batch size (number of sentences processed in parallel), $T_{\text{src}}$ is the length of the source sequence (number of input tokens after padding), and $d_{\text{model}}$ is the embedding dimension --- the width of every hidden representation in the model (512 in the base transformer).
+
 The critical difference from the decoder blocks in Document 02: \textbf{there is no causal mask}. Every position can attend to every other position. This is \textbf{bidirectional} attention --- position 5 can look at position 10, and position 10 can look at position 5.
 
 Why bidirectional? The encoder processes the entire input at once. When translating ``The cat sat on the mat'' from English to German, the encoder already has the complete input sentence. There is no reason to hide any positions from each other. The word ``cat'' should be able to use context from ``mat'' at the end of the sentence, and vice versa. Restricting the encoder to only look leftward (as a causal mask does) would throw away useful information for no benefit.
@@ -107,9 +109,15 @@ embedding = nn.Embedding(vocab_size, d_model)
 
 Each row of the embedding matrix corresponds to one token in the vocabulary. These vectors are initialized randomly and learned during training. After training, tokens with similar meanings will tend to have similar embedding vectors.
 
-The original paper uses a \textbf{shared embedding matrix} for both the encoder and decoder. This makes sense when the source and target languages share a vocabulary (common with subword tokenization schemes like BPE, which construct a joint vocabulary across both languages). Sharing means the model uses one set of embedding vectors for, say, the token ``the'' regardless of whether it appears on the source side or the target side.
+The original paper uses a \textbf{shared embedding matrix} for both the encoder and decoder. This makes sense when the source and target languages share a vocabulary (common with subword tokenization schemes like BPE, which construct a joint vocabulary across both languages).
 
+\tip{%
+\textbf{What is BPE?} Byte Pair Encoding is a subword tokenization algorithm. Start with a vocabulary of individual characters. Count every adjacent pair of tokens in the training corpus, merge the most frequent pair into a new token, and repeat for a fixed number of merges (which controls the final vocabulary size). Common words like ``the'' become single tokens; rare words like ``unhappiness'' get split into subword pieces (e.g.\ ``un'' + ``happiness''). This gives a compact vocabulary with no out-of-vocabulary problem --- any string can be represented. GPT-2 uses byte-level BPE, where the base vocabulary is all 256 bytes. Our BabyGPT sidesteps tokenization entirely by treating each character as its own token (vocab size 65).
+} Sharing means the model uses one set of embedding vectors for, say, the token ``the'' regardless of whether it appears on the source side or the target side.
+
+\tip{%
 \textbf{The $\sqrt{d_{\text{model}}}$ scaling.} The paper multiplies embedding vectors by $\sqrt{d_{\text{model}}}$ before adding positional encodings. This is easy to miss but has a concrete reason. \code{nn.Embedding} initializes its weight matrix from a standard normal distribution, which gives vectors with entries roughly distributed as $\mathcal{N}(0, 1)$. The L2 norm of such a $d_{\text{model}}$-dimensional vector is approximately $\sqrt{d_{\text{model}}}$, meaning each component has magnitude roughly 1. But in practice, many implementations (including the paper's) initialize with variance closer to $1/d_{\text{model}}$, which gives per-component magnitudes of roughly $1/\sqrt{d_{\text{model}}}$. Meanwhile, the sinusoidal positional encodings (described next) have components bounded in $[-1, 1]$, so their per-component magnitude is \textasciitilde{}1. Without scaling, the positional encodings would dominate the token embeddings. Multiplying by $\sqrt{d_{\text{model}}}$ brings the embedding magnitudes up to the same scale as the positional encodings, so neither overwhelms the other.
+}
 
 \section{Positional Encoding}
 
@@ -125,7 +133,11 @@ The original paper uses \textbf{fixed sinusoidal positional encodings}:
 
 \[PE_{(pos, 2i+1)} = \cos\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)\]
 
-where $pos$ is the position in the sequence (0, 1, 2, \ldots) and $i$ is the dimension index (0, 1, 2, \ldots, $d_{\text{model}}/2 - 1$).
+where $pos$ is the position in the sequence (0, 1, 2, \ldots) and $i$ is the dimension pair index (0, 1, 2, \ldots, $d_{\text{model}}/2 - 1$).
+
+\tip{%
+\textbf{Reading the two formulas.} The goal is to build a matrix $PE$ of shape $(T, d_{\text{model}})$ --- same shape as the token embeddings --- so we can add them element-wise. The two formulas fill this matrix column by column: the first formula fills even columns ($0, 2, 4, \ldots$) with $\sin$, the second fills odd columns ($1, 3, 5, \ldots$) with $\cos$. Columns $2i$ and $2i{+}1$ form a pair that share the same frequency but use $\sin$ and $\cos$ respectively --- like the $x$ and $y$ coordinates of a point on a circle. Each pair oscillates at a different frequency controlled by $i$: pair $i{=}0$ oscillates fast, and the last pair oscillates extremely slowly. The result is that each row (position) gets a unique combination of fast and slow oscillations across its $d_{\text{model}}$ dimensions --- a unique positional fingerprint. This is the matrix that gets added: \code{x = token\_embeddings + PE}.
+}
 
 Each pair of dimensions $(2i, 2i+1)$ forms a sinusoid at a different frequency:
 
@@ -133,6 +145,32 @@ Each pair of dimensions $(2i, 2i+1)$ forms a sinusoid at a different frequency:
   \item Dimensions 0 and 1: wavelength $= 2\pi$ (the fastest oscillation --- the encoding changes rapidly across positions)
   \item Last pair of dimensions: wavelength $= 2\pi \times 10000$ (extremely slow --- the encoding barely changes from one position to the next)
 \end{itemize}
+
+The heatmap below shows the positional encoding matrix for 50 positions and 64 dimensions. Each row is one position, each column is one dimension, and color maps to value ($-1$ to $+1$). The left columns oscillate rapidly across positions (high frequency); the right columns change very slowly (low frequency). Each row has a unique pattern --- the positional fingerprint.
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+    view={0}{90},
+    width=0.8\linewidth,
+    height=7cm,
+    xlabel={Dimension index},
+    ylabel={Position},
+    colorbar,
+    colorbar style={ylabel={$PE$ value}},
+    point meta min=-1,
+    point meta max=1,
+    samples=50,
+    colormap={bluered}{rgb255(0cm)=(49,54,149) rgb255(0.25cm)=(120,150,230)
+      rgb255(0.5cm)=(255,255,255) rgb255(0.75cm)=(230,120,100) rgb255(1cm)=(165,0,38)},
+]
+% sin(pos / 10000^(dim/d_model)) with d_model=64
+% 10000^(dim/64) = exp(dim * ln(10000) / 64); ln(10000) = 9.21034
+\addplot3[surf, shader=flat, domain=0:63, y domain=0:49]
+    {sin(deg(y * exp(-x * 9.21034 / 64)))};
+\end{axis}
+\end{tikzpicture}
+\end{center}
 
 The range of frequencies is geometric, spanning from $2\pi$ to $2\pi \times 10000$. This creates a unique ``fingerprint'' for each position: no two positions have the same pattern of values across all dimensions.
 
@@ -197,25 +235,128 @@ Weight tying also has a practical benefit: for large vocabularies (32K or more t
 
 \section{Putting It All Together}
 
-The complete architecture:
+The complete architecture, following the layout from ``Attention Is All You Need'' Figure~1:
 
-\begin{verbatim}
-Encoder:                          Decoder:
-  Source Tokens                     Target Tokens (shifted right)
-  -> Embed * sqrt(d_model) + PE     -> Embed * sqrt(d_model) + PE
-  -> [EncoderLayer x 6]            -> [DecoderLayer x 6]
-  -> Encoder Output --------------- (cross-attn K, V)
-                                    -> Linear (tied weights) -> Softmax
-                                    -> Output Probabilities
-\end{verbatim}
+\begin{center}
+\begin{tikzpicture}[
+    box/.style={draw, rounded corners=2pt, minimum width=2.6cm, minimum height=0.55cm,
+                align=center, font=\scriptsize\sffamily},
+    attn/.style={box, fill=orange!30},
+    norm/.style={box, fill=yellow!25},
+    ffn/.style={box, fill=blue!15},
+    emb/.style={box, fill=orange!20},
+    head/.style={box, fill=blue!15},
+    lbl/.style={font=\scriptsize\sffamily},
+    arr/.style={->, >=stealth, thick},
+    res/.style={->, >=stealth, thin, gray},
+    every node/.style={inner sep=3pt},
+]
 
-Each \code{EncoderLayer} contains:
+% ---- Encoder (left) ----
+\def\ex{-2.2}  % encoder x centre
+
+% Input label
+\node[lbl] (einput) at (\ex, 0) {Inputs};
+
+% Input Embedding
+\node[emb] (eemb) at (\ex, 0.8) {Input Embedding};
+\draw[arr] (einput) -- (eemb);
+
+% Positional encoding
+\node[lbl] (epe) at (\ex, 1.55) {$\oplus$ Positional Encoding};
+\draw[arr] (eemb) -- (epe);
+
+% Encoder N× block
+\begin{scope}[on background layer]
+  \draw[rounded corners=5pt, fill=gray!12, draw=gray!50]
+    (\ex-1.65, 2.0) rectangle (\ex+1.65, 5.0);
+\end{scope}
+\node[lbl, gray] at (\ex+1.35, 2.2) {$\times N$};
+
+% Encoder sublayers
+\node[attn] (esa) at (\ex, 2.7) {Multi-Head Attention};
+\draw[arr] (epe) -- (esa);
+
+\node[norm] (en1) at (\ex, 3.35) {Add \& Norm};
+\draw[arr] (esa) -- (en1);
+% residual
+\draw[res] ([xshift=-1.5cm]esa.south) |- (en1.west);
+
+\node[ffn]  (eff) at (\ex, 4.0) {Feed Forward};
+\draw[arr] (en1) -- (eff);
+
+\node[norm] (en2) at (\ex, 4.65) {Add \& Norm};
+\draw[arr] (eff) -- (en2);
+% residual
+\draw[res] ([xshift=-1.5cm]eff.south) |- (en2.west);
+
+% ---- Decoder (right) ----
+\def\dx{2.2}  % decoder x centre
+
+% Output label
+\node[lbl] (dinput) at (\dx, 0) {Outputs (shifted right)};
+
+% Output Embedding
+\node[emb] (demb) at (\dx, 0.8) {Output Embedding};
+\draw[arr] (dinput) -- (demb);
+
+% Positional encoding
+\node[lbl] (dpe) at (\dx, 1.55) {$\oplus$ Positional Encoding};
+\draw[arr] (demb) -- (dpe);
+
+% Decoder N× block
+\begin{scope}[on background layer]
+  \draw[rounded corners=5pt, fill=gray!12, draw=gray!50]
+    (\dx-1.65, 2.0) rectangle (\dx+1.65, 6.65);
+\end{scope}
+\node[lbl, gray] at (\dx+1.35, 2.2) {$\times N$};
+
+% Decoder sublayers
+\node[attn] (dma) at (\dx, 2.7) {\shortstack{Masked\\[-1pt]Multi-Head Attention}};
+\draw[arr] (dpe) -- (dma);
+
+\node[norm] (dn1) at (\dx, 3.45) {Add \& Norm};
+\draw[arr] (dma) -- (dn1);
+\draw[res] ([xshift=1.5cm]dma.south) |- (dn1.east);
+
+\node[attn] (dca) at (\dx, 4.15) {Multi-Head Attention};
+\draw[arr] (dn1) -- (dca);
+
+\node[norm] (dn2) at (\dx, 4.8) {Add \& Norm};
+\draw[arr] (dca) -- (dn2);
+\draw[res] ([xshift=1.5cm]dca.south) |- (dn2.east);
+
+\node[ffn]  (dff) at (\dx, 5.45) {Feed Forward};
+\draw[arr] (dn2) -- (dff);
+
+\node[norm] (dn3) at (\dx, 6.1) {Add \& Norm};
+\draw[arr] (dff) -- (dn3);
+\draw[res] ([xshift=1.5cm]dff.south) |- (dn3.east);
+
+% ---- Cross-attention arrow (encoder -> decoder) ----
+\draw[arr] (en2.east) -- ++(0.3,0) |- (dca.west)
+    node[lbl, pos=0.25, above] {K, V};
+
+% ---- Output head ----
+\node[head] (lin) at (\dx, 7.2) {Linear};
+\draw[arr] (dn3) -- (lin);
+
+\node[head] (soft) at (\dx, 7.85) {Softmax};
+\draw[arr] (lin) -- (soft);
+
+\node[lbl] (oprob) at (\dx, 8.5) {Output Probabilities};
+\draw[arr] (soft) -- (oprob);
+
+\end{tikzpicture}
+\end{center}
+
+Each \code{EncoderLayer} ($\times N$ on the left) contains:
 \begin{itemize}
   \item Multi-head self-attention (bidirectional) + residual + LayerNorm
   \item Feed-forward network + residual + LayerNorm
 \end{itemize}
 
-Each \code{DecoderLayer} contains:
+Each \code{DecoderLayer} ($\times N$ on the right) contains:
 \begin{itemize}
   \item Masked multi-head self-attention (causal) + residual + LayerNorm
   \item Multi-head cross-attention (Q from decoder, K/V from encoder) + residual + LayerNorm
@@ -262,6 +403,72 @@ This schedule linearly increases the learning rate for the first \code{warmup\_s
 The encoder-decoder architecture is well-suited for sequence-to-sequence tasks where the input and output are distinct sequences (translation, summarization). But for \textbf{language modeling} --- the task of predicting the next token given preceding tokens --- the encoder and cross-attention are unnecessary overhead. There is no separate ``input'' to encode; the model just reads text and predicts what comes next.
 
 GPT (Radford et al., 2018) simplifies the transformer by keeping only the decoder (with its causal mask), removing the encoder and cross-attention entirely. What remains is a stack of transformer blocks, each containing masked self-attention and a feed-forward network --- exactly the blocks we built in Document 02.
+
+Compare the decoder-only architecture to the full encoder-decoder above --- the entire left half and the cross-attention sublayer are gone:
+
+\begin{center}
+\begin{tikzpicture}[
+    box/.style={draw, rounded corners=2pt, minimum width=2.8cm, minimum height=0.55cm,
+                align=center, font=\scriptsize\sffamily},
+    attn/.style={box, fill=orange!30},
+    norm/.style={box, fill=yellow!25},
+    ffn/.style={box, fill=blue!15},
+    emb/.style={box, fill=orange!20},
+    head/.style={box, fill=blue!15},
+    lbl/.style={font=\scriptsize\sffamily},
+    arr/.style={->, >=stealth, thick},
+    res/.style={->, >=stealth, thin, gray},
+    every node/.style={inner sep=3pt},
+]
+
+\def\cx{0}  % centre x
+
+% Input label
+\node[lbl] (input) at (\cx, 0) {Input Tokens};
+
+% Token Embedding
+\node[emb] (emb) at (\cx, 0.8) {Token Embedding};
+\draw[arr] (input) -- (emb);
+
+% Positional embedding
+\node[lbl] (pe) at (\cx, 1.55) {$\oplus$ Positional Embedding};
+\draw[arr] (emb) -- (pe);
+
+% N× block
+\begin{scope}[on background layer]
+  \draw[rounded corners=5pt, fill=gray!12, draw=gray!50]
+    (\cx-1.75, 2.0) rectangle (\cx+1.75, 5.0);
+\end{scope}
+\node[lbl, gray] at (\cx+1.45, 2.2) {$\times N$};
+
+% Masked self-attention
+\node[attn] (msa) at (\cx, 2.7) {\shortstack{Masked\\[-1pt]Multi-Head Attention}};
+\draw[arr] (pe) -- (msa);
+
+\node[norm] (n1) at (\cx, 3.45) {Add \& Norm};
+\draw[arr] (msa) -- (n1);
+\draw[res] ([xshift=-1.6cm]msa.south) |- (n1.west);
+
+% Feed forward
+\node[ffn] (ff) at (\cx, 4.1) {Feed Forward};
+\draw[arr] (n1) -- (ff);
+
+\node[norm] (n2) at (\cx, 4.65) {Add \& Norm};
+\draw[arr] (ff) -- (n2);
+\draw[res] ([xshift=-1.6cm]ff.south) |- (n2.west);
+
+% Output head
+\node[head] (lin) at (\cx, 5.5) {Linear (tied weights)};
+\draw[arr] (n2) -- (lin);
+
+\node[head] (soft) at (\cx, 6.15) {Softmax};
+\draw[arr] (lin) -- (soft);
+
+\node[lbl] (oprob) at (\cx, 6.8) {Next-Token Probabilities};
+\draw[arr] (soft) -- (oprob);
+
+\end{tikzpicture}
+\end{center}
 
 In Document 04, we will make this simplification explicit and assemble our BabyGPT.
 

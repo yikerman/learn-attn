@@ -23,7 +23,7 @@ This document derives scaled dot-product attention from the ground up, builds mu
 
 \section{What Problem Does Attention Solve?}
 
-Consider a sequence of $T$ token embeddings, each a vector in $\mathbb{R}^d$. Every position in the sequence carries some meaning, but meaning in language is deeply contextual --- the word ``bank'' means something different depending on whether ``river'' or ``account'' appears nearby. So each position needs a mechanism to gather information from other positions.
+Consider a sequence of $T$ token embeddings, each a vector in $\mathbb{R}^d$. (How tokens become vectors is covered in Document~03, Section~5. For now, just accept that each token is represented as a $d$-dimensional vector.) Every position in the sequence carries some meaning, but meaning in language is deeply contextual --- the word ``bank'' means something different depending on whether ``river'' or ``account'' appears nearby. So each position needs a mechanism to gather information from other positions.
 
 Before attention, the dominant approach was recurrent neural networks (RNNs). An RNN processes a sequence left to right, maintaining a hidden state that gets updated at each step. This has two problems:
 
