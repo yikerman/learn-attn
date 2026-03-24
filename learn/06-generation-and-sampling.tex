@@ -78,6 +78,10 @@ next_token = torch.multinomial(probs, num_samples=1)
 
 Practical range: 0.5 to 1.2 covers most use cases. Below 0.5, output is nearly deterministic. Above 1.2, the model starts making frequent errors.
 
+\tip{%
+\textbf{Why is it called ``temperature''?} The name comes from statistical mechanics. The Boltzmann distribution gives the probability of a physical system occupying a state with energy $E_i$ at temperature $T$: $P(\text{state}_i) \propto \exp(-E_i / kT)$. Our softmax-with-temperature has the same functional form (the sign is flipped because higher logits are \emph{better}, whereas lower energies are more favorable). The analogy maps exactly: high physical temperature means particles spread across many energy states (more disorder); high softmax temperature means probability spreads across many tokens (more randomness). As $T \to 0$, a physical system freezes into its lowest-energy ground state; our model freezes into argmax (greedy decoding). ``Turn up the temperature'' means the same thing in both worlds: more thermal energy, more randomness.
+}
+
 \section{Top-k Sampling}
 
 Temperature controls the shape of the distribution, but it does not eliminate the long tail. Even at moderate temperatures, the model occasionally samples from tokens with very low probability --- characters that make no sense in context. These rare samples produce garbage characters that derail the text.
@@ -131,12 +135,9 @@ We do not implement top-p in our code --- top-k is sufficient for a character-le
 
 \section{The Generate Function}
 
-The complete generation pipeline is split across two files:
+First, add the \code{generate()} method to the \code{BabyGPT} class in \code{src/model.py}. This method implements the full autoregressive loop from Sections 1--4: forward pass, temperature scaling, top-k filtering, sampling, and appending.
 
-\textbf{\code{src/model.py}} contains the \code{generate()} method on the model class:
-
-\concepttag
-{\small\itshape This method is already in \code{src/model.py} (created in Document~04).}
+\filetag{src/model.py --- add to \code{BabyGPT} class, after \code{forward}}
 \begin{lstlisting}
 @torch.no_grad()
 def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
@@ -165,20 +166,7 @@ def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
     return idx
 \end{lstlisting}
 
-\textbf{\code{src/generate.py}} contains the CLI script that ties everything together:
-
-\begin{enumerate}
-  \item Load the checkpoint (model weights, config, vocabulary).
-  \item Reconstruct the model and tokenizer.
-  \item Encode the prompt string to a tensor of token IDs.
-  \item Call \code{model.generate()} to produce new tokens.
-  \item Decode the full sequence (prompt + generated tokens) back to a string.
-\end{enumerate}
-
-\shelltag
-\begin{lstlisting}[language=bash]
-uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8 --top-k 40
-\end{lstlisting}
+Next, we need a CLI script to load a trained checkpoint, encode a prompt, call \code{model.generate()}, and print the result.
 
 \subsection{Creating the Generation Script}
 
@@ -284,11 +272,11 @@ uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8
 
 The quality of generated text varies significantly with temperature. Here is what to expect from a trained BabyGPT at different settings:
 
-\textbf{Temperature 0.5} (conservative): More repetitive phrasing, better character-level spelling, tends to stick to common patterns. The model produces text that looks structurally correct but lacks variety. Dialogue formatting (character names followed by colons) is usually correct. The same phrases may repeat.
+\textbf{Temperature 0.5} (conservative): Correct spelling and formatting, but repetitive. The same phrases recur.
 
-\textbf{Temperature 0.8} (recommended): A good balance between coherence and variety. The model produces varied text with mostly correct spelling and formatting. Individual lines look plausible as Shakespeare-like dialogue. This is the default in our \code{src/generate.py}.
+\textbf{Temperature 0.8} (recommended): Good balance of coherence and variety. The default in \code{src/generate.py}.
 
-\textbf{Temperature 1.2} (creative): More surprising word choices and character combinations, but more spelling errors and occasional nonsense characters. The text is more varied but less consistently well-formed. Occasional stretches of gibberish.
+\textbf{Temperature 1.2} (creative): More surprising choices, but more spelling errors and occasional gibberish.
 
 Important: this is a \textbf{character-level} model trained on 1MB of text. The model learns:
 
