@@ -1,8 +1,6 @@
-\input{preamble}
-\begin{document}
-\docheader{The Transformer Block}{2}
+\chapter{The Transformer Block}
 
-Document 01 built up the core operation of a transformer: scaled dot-product attention, multi-head attention, and causal masking. But attention alone is not enough to build a deep network. This document covers the remaining components that, together with attention, form the \textbf{transformer block} --- the repeating unit that gets stacked to build every modern large language model.
+Chapter~1 built up the core operation of a transformer: scaled dot-product attention, multi-head attention, and causal masking. But attention alone is not enough to build a deep network. This document covers the remaining components that, together with attention, form the \textbf{transformer block} --- the repeating unit that gets stacked to build every modern large language model.
 
 We will build four things: residual connections, layer normalization, the position-wise feed-forward network, and then assemble them into a single block.
 
@@ -92,7 +90,7 @@ The normalization centers and scales each position's feature vector to zero mean
 
 Following modern convention (GPT-J, LLaMA), we default to \code{bias=False}:
 
-This class will go into \code{src/model.py} in Document~04. For now, understand the structure.
+This class will go into \code{babygpt/model.py} in Chapter~4. For now, understand the structure.
 
 \concepttag
 \begin{lstlisting}
@@ -237,7 +235,7 @@ If $X$ has shape $(T, d_{\text{model}})$, then $X W_1$ is $(T, d_{\text{model}})
 
 \subsection{Implementation}
 
-This class will go into \code{src/model.py} in Document~04. For now, understand the structure.
+This class will go into \code{babygpt/model.py} in Chapter~4. For now, understand the structure.
 
 \concepttag
 \begin{lstlisting}
@@ -270,7 +268,7 @@ The two sublayers serve complementary roles:
 
 \subsection{Implementation}
 
-This class will go into \code{src/model.py} in Document~04. For now, understand the structure.
+This class will go into \code{babygpt/model.py} in Chapter~4. For now, understand the structure.
 
 \concepttag
 \begin{lstlisting}
@@ -294,7 +292,7 @@ A transformer model is $N$ identical blocks applied in sequence. In our BabyGPT,
 
 After the last block, a final LayerNorm is applied:
 
-Preview of the forward pass in \code{BabyGPT}, which we build in Document~04.
+Preview of the forward pass in \code{BabyGPT}, which we build in Chapter~4.
 
 \concepttag
 \begin{lstlisting}
@@ -320,6 +318,4 @@ The FFN accounts for about two-thirds of each block's parameters.
 
 \section{Looking Ahead}
 
-We now have the complete building block. In Document 03, we look at the full encoder-decoder architecture from the original paper. In Document 04, we simplify to the decoder-only GPT architecture we implement.
-
-\end{document}
+We now have the complete building block. In Chapter~3, we look at the full encoder-decoder architecture from the original paper. In Chapter~4, we simplify to the decoder-only GPT architecture we implement.

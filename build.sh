@@ -3,15 +3,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/learn"
 
-for f in 0*.tex; do
-    name="${f%.tex}"
-    echo "Compiling $f ..."
-    pdflatex -interaction=nonstopmode "$f" > /dev/null
-    pdflatex -interaction=nonstopmode "$f" > /dev/null  # second pass for hyperref
-    echo "  -> ${name}.pdf"
-done
+echo "Compiling babygpt-tutorial.tex ..."
+pdflatex -interaction=nonstopmode babygpt-tutorial.tex > /dev/null
+pdflatex -interaction=nonstopmode babygpt-tutorial.tex > /dev/null  # second pass for hyperref/TOC
+echo "  -> babygpt-tutorial.pdf"
 
 # Clean auxiliary files
 rm -f *.aux *.log *.out *.toc
 
-echo "Done. PDFs in learn/"
+echo "Done. PDF in learn/"

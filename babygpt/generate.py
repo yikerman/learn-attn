@@ -5,9 +5,9 @@ from pathlib import Path
 
 import torch
 
-from src.config import GPTConfig
-from src.model import BabyGPT
-from src.tokenizer import CharTokenizer
+from .config import GPTConfig
+from .model import BabyGPT
+from .tokenizer import CharTokenizer
 
 CHECKPOINT_DIR = Path(__file__).resolve().parent.parent / "checkpoints"
 
@@ -27,15 +27,14 @@ def load_model(
 
     # Reconstruct tokenizer from saved vocab
     vocab = checkpoint["vocab"]
-    # Create a dummy tokenizer and set its mappings
-    tok = CharTokenizer.__new__(CharTokenizer)
-    tok.char_to_idx = vocab
-    tok.idx_to_char = {i: ch for ch, i in vocab.items()}
+    tokenizer = CharTokenizer.__new__(CharTokenizer)
+    tokenizer.char_to_index = vocab
+    tokenizer.index_to_char = {i: ch for ch, i in vocab.items()}
 
     print(f"Loaded model from {checkpoint_path}")
     print(f"  step={checkpoint.get('step', '?')}, val_loss={checkpoint.get('val_loss', '?'):.4f}")
 
-    return model, tok
+    return model, tokenizer
 
 
 def generate(
@@ -48,15 +47,15 @@ def generate(
     device: torch.device = torch.device("cpu"),
 ) -> str:
     """Generate text given a prompt string."""
-    tokens = tokenizer.encode(prompt)
-    idx = torch.tensor([tokens], dtype=torch.long, device=device)
+    token_ids = tokenizer.encode(prompt)
+    tokens = torch.tensor([token_ids], dtype=torch.long, device=device)
 
-    output = model.generate(idx, max_new_tokens, temperature=temperature, top_k=top_k)
+    output = model.generate(tokens, max_new_tokens, temperature=temperature, top_k=top_k)
 
     return tokenizer.decode(output[0].tolist())
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Generate text with BabyGPT")
     parser.add_argument("--prompt", type=str, default="\n", help="Starting text")
     parser.add_argument("--max-tokens", type=int, default=500, help="Tokens to generate")

@@ -9,17 +9,17 @@ class CharTokenizer:
     ID. There are no subword units, no byte-pair encoding, no special tokens.
     """
 
-    def __init__(self, text: str):
+    def __init__(self, text: str) -> None:
         chars = sorted(set(text))
-        self.char_to_idx = {ch: i for i, ch in enumerate(chars)}
-        self.idx_to_char = {i: ch for i, ch in enumerate(chars)}
+        self.char_to_index = {ch: i for i, ch in enumerate(chars)}
+        self.index_to_char = {i: ch for i, ch in enumerate(chars)}
 
     @property
     def vocab_size(self) -> int:
-        return len(self.char_to_idx)
+        return len(self.char_to_index)
 
     def encode(self, text: str) -> list[int]:
-        return [self.char_to_idx[ch] for ch in text]
+        return [self.char_to_index[ch] for ch in text]
 
     def decode(self, tokens: list[int]) -> str:
-        return "".join(self.idx_to_char[t] for t in tokens)
+        return "".join(self.index_to_char[token] for token in tokens)

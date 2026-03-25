@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 @dataclass
 class GPTConfig:
-    block_size: int = 256       # max sequence length (context window)
+    context_size: int = 256     # max sequence length (context window)
     vocab_size: int = 65        # number of unique tokens (characters in TinyShakespeare)
     n_layer: int = 6            # number of transformer blocks
     n_head: int = 6             # number of attention heads

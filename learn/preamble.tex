@@ -1,7 +1,7 @@
-% Shared preamble for learn-attn documents
-% Usage: \input{preamble} at the top of each document
+% Shared preamble for the BabyGPT tutorial
+% Usage: \input{preamble} at the top of the document
 
-\documentclass[11pt, a4paper]{article}
+\documentclass[11pt, a4paper]{report}
 
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
@@ -51,20 +51,11 @@
 % Inline code
 \newcommand{\code}[1]{\texttt{#1}}
 
-% Document series header
-\newcommand{\docheader}[2]{%
-  \begin{center}
-    {\Large\bfseries #1}\\[6pt]
-    {\itshape Document #2 of 6\,---\,Building a GPT from Scratch}
-  \end{center}
-  \vspace{1em}
-}
-
 % --- Code block annotations ---
 % Small colored tags placed before a listing to clarify its role.
 
 % Code that the reader should put into a project file.
-% Usage: \filetag{src/model.py}  (before \begin{lstlisting})
+% Usage: \filetag{babygpt/model.py}  (before \begin{lstlisting})
 \newcommand{\filetag}[1]{%
   \par\noindent
   \colorbox{black!8}{\small\sffamily\bfseries File: \code{#1}}%

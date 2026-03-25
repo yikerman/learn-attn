@@ -1,6 +1,4 @@
-\input{preamble}
-\begin{document}
-\docheader{Generation and Sampling}{6}
+\chapter{Generation and Sampling}
 
 Training teaches the model to predict the next token. Generation is where we actually use that ability: start with a prompt, predict the next token, append it, and repeat. The quality of the output depends entirely on how we select each token from the model's predicted probability distribution.
 
@@ -19,12 +17,15 @@ The generation procedure is a loop:
 
 This is inherently sequential. Each new token depends on all previous tokens (through the causal self-attention mechanism), so there is no way to generate multiple tokens in parallel. This is the fundamental speed bottleneck of autoregressive language models --- during generation, you do one full forward pass per token.
 
-When the sequence grows beyond \code{block\_size} (256 in our model), we crop from the left:
+When the sequence grows beyond \code{context\_size} (256 in our model), we crop from the left:
 
 \concepttag
-{\small\itshape From \code{BabyGPT.generate} in \code{src/model.py}.}
+{\small\itshape From \code{BabyGPT.generate} in \code{babygpt/model.py}.}
 \begin{lstlisting}
-idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+tokens_cropped = (
+    tokens if tokens.size(1) <= self.config.context_size
+    else tokens[:, -self.config.context_size:]
+)
 \end{lstlisting}
 
 The model can only attend to the most recent 256 tokens. Earlier tokens are simply dropped. This is a hard limitation of fixed-length positional embeddings.
@@ -68,7 +69,7 @@ The effect depends on $T$:
 \textbf{$T < 1.0$} (but above 0): The distribution becomes sharper than the model's default. High-probability tokens become even more dominant, low-probability tokens become even less likely. This produces more conservative, predictable text.
 
 \concepttag
-{\small\itshape From \code{BabyGPT.generate} in \code{src/model.py}.}
+{\small\itshape From \code{BabyGPT.generate} in \code{babygpt/model.py}.}
 \begin{lstlisting}
 # In our generate() method:
 logits = logits[:, -1, :] / temperature  # scale before softmax
@@ -89,11 +90,11 @@ Temperature controls the shape of the distribution, but it does not eliminate th
 Top-k sampling fixes this by restricting the sample to the $k$ most probable tokens. All other tokens are set to $-\infty$ before softmax, which gives them zero probability.
 
 \concepttag
-{\small\itshape From \code{BabyGPT.generate} in \code{src/model.py}.}
+{\small\itshape From \code{BabyGPT.generate} in \code{babygpt/model.py}.}
 \begin{lstlisting}
 if top_k is not None:
-    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-    logits[logits < v[:, [-1]]] = float("-inf")
+    top_values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+    logits[logits < top_values[:, [-1]]] = float("-inf")
 
 probs = F.softmax(logits, dim=-1)
 next_token = torch.multinomial(probs, num_samples=1)
@@ -103,7 +104,7 @@ Step by step:
 
 \begin{enumerate}
   \item \code{torch.topk(logits, k)} returns the $k$ largest logit values (and their indices).
-  \item \code{v[:, [-1]]} is the smallest value among the top $k$ --- the threshold.
+  \item \code{top\_values[:, [-1]]} is the smallest value among the top $k$ --- the threshold.
   \item Every logit below this threshold is set to $-\infty$.
   \item Softmax converts $-\infty$ to probability 0. Only the top $k$ tokens have nonzero probability.
   \item \code{torch.multinomial} samples from this truncated distribution.
@@ -135,44 +136,51 @@ We do not implement top-p in our code --- top-k is sufficient for a character-le
 
 \section{The Generate Function}
 
-First, add the \code{generate()} method to the \code{BabyGPT} class in \code{src/model.py}. This method implements the full autoregressive loop from Sections 1--4: forward pass, temperature scaling, top-k filtering, sampling, and appending.
+First, add the \code{generate()} method to the \code{BabyGPT} class in \code{babygpt/model.py}. This method implements the full autoregressive loop from Sections 1--4: forward pass, temperature scaling, top-k filtering, sampling, and appending.
 
-\filetag{src/model.py --- add to \code{BabyGPT} class, after \code{forward}}
+\filetag{babygpt/model.py --- add to \code{BabyGPT} class, after \code{forward}}
 \begin{lstlisting}
 @torch.no_grad()
-def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-    """Autoregressive token generation (Sections 1--4).
+def generate(
+    self,
+    tokens: torch.Tensor,
+    max_new_tokens: int,
+    temperature: float = 1.0,
+    top_k: int | None = None,
+) -> torch.Tensor:
+    """Autoregressive token generation.
 
     Loop: forward pass -> logits / temperature -> top-k filter
           -> softmax -> multinomial sample -> append token.
-    Crops to block_size when sequence exceeds context window.
+    Crops to context_size when sequence exceeds context window.
     """
     for _ in range(max_new_tokens):
-        # Crop to block_size if sequence too long
-        idx_cond = idx if idx.size(1) <= self.config.block_size \
-                       else idx[:, -self.config.block_size:]
+        tokens_cropped = (
+            tokens if tokens.size(1) <= self.config.context_size
+            else tokens[:, -self.config.context_size:]
+        )
 
-        logits, _ = self(idx_cond)          # forward pass
-        logits = logits[:, -1, :] / temperature   # last position, scale
+        logits, _ = self(tokens_cropped)
+        logits = logits[:, -1, :] / temperature  # (batch, vocab_size)
 
         if top_k is not None:
-            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            logits[logits < v[:, [-1]]] = float("-inf")
+            top_values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < top_values[:, [-1]]] = float("-inf")
 
         probs = F.softmax(logits, dim=-1)
-        next_token = torch.multinomial(probs, num_samples=1)
-        idx = torch.cat([idx, next_token], dim=1)
+        next_token = torch.multinomial(probs, num_samples=1)  # (batch, 1)
+        tokens = torch.cat([tokens, next_token], dim=1)
 
-    return idx
+    return tokens
 \end{lstlisting}
 
 Next, we need a CLI script to load a trained checkpoint, encode a prompt, call \code{model.generate()}, and print the result.
 
 \subsection{Creating the Generation Script}
 
-Create \code{src/generate.py} --- the CLI wrapper that loads a checkpoint, encodes the prompt, calls \code{model.generate()}, and prints the result:
+Create \code{babygpt/generate.py} --- the CLI wrapper that loads a checkpoint, encodes the prompt, calls \code{model.generate()}, and prints the result:
 
-\filetag{src/generate.py}
+\filetag{babygpt/generate.py}
 \begin{lstlisting}
 """Generate text from a trained BabyGPT checkpoint."""
 
@@ -181,22 +189,20 @@ from pathlib import Path
 
 import torch
 
-from src.config import GPTConfig
-from src.model import BabyGPT
-from src.tokenizer import CharTokenizer
+from .config import GPTConfig
+from .model import BabyGPT
+from .tokenizer import CharTokenizer
 
 CHECKPOINT_DIR = Path(__file__).resolve().parent.parent / "checkpoints"
 
 
-def load_model(checkpoint_path, device):
-    """Load a model and tokenizer from a checkpoint (Section 6).
+def load_model(
+    checkpoint_path: Path,
+    device: torch.device,
+) -> tuple[BabyGPT, CharTokenizer]:
+    """Load a model and tokenizer from a checkpoint."""
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    Checkpoint contains: model state_dict, GPTConfig, vocab mapping.
-    Reconstructs BabyGPT + CharTokenizer, sets model to eval mode.
-    """
-    checkpoint = torch.load(
-        checkpoint_path, map_location=device, weights_only=False
-    )
     config = checkpoint["config"]
     model = BabyGPT(config)
     model.load_state_dict(checkpoint["model"])
@@ -205,39 +211,45 @@ def load_model(checkpoint_path, device):
 
     # Reconstruct tokenizer from saved vocab
     vocab = checkpoint["vocab"]
-    tok = CharTokenizer.__new__(CharTokenizer)
-    tok.char_to_idx = vocab
-    tok.idx_to_char = {i: ch for ch, i in vocab.items()}
+    tokenizer = CharTokenizer.__new__(CharTokenizer)
+    tokenizer.char_to_index = vocab
+    tokenizer.index_to_char = {i: ch for ch, i in vocab.items()}
 
     print(f"Loaded model from {checkpoint_path}")
-    print(
-        f"  step={checkpoint.get('step', '?')}, "
-        f"val_loss={checkpoint.get('val_loss', '?'):.4f}"
-    )
-    return model, tok
+    print(f"  step={checkpoint.get('step', '?')}, val_loss={checkpoint.get('val_loss', '?'):.4f}")
+
+    return model, tokenizer
 
 
-def generate(model, tokenizer, prompt, max_new_tokens=500,
-             temperature=1.0, top_k=None, device=torch.device("cpu")):
-    """Encode prompt -> model.generate() -> decode back to string."""
-    tokens = tokenizer.encode(prompt)
-    idx = torch.tensor([tokens], dtype=torch.long, device=device)
-    output = model.generate(
-        idx, max_new_tokens, temperature=temperature, top_k=top_k
-    )
+def generate(
+    model: BabyGPT,
+    tokenizer: CharTokenizer,
+    prompt: str,
+    max_new_tokens: int = 500,
+    temperature: float = 1.0,
+    top_k: int | None = None,
+    device: torch.device = torch.device("cpu"),
+) -> str:
+    """Generate text given a prompt string."""
+    token_ids = tokenizer.encode(prompt)
+    tokens = torch.tensor([token_ids], dtype=torch.long, device=device)
+
+    output = model.generate(tokens, max_new_tokens, temperature=temperature, top_k=top_k)
+
     return tokenizer.decode(output[0].tolist())
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Generate text with BabyGPT")
-    parser.add_argument("--prompt", type=str, default="\n")
-    parser.add_argument("--max-tokens", type=int, default=500)
-    parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--prompt", type=str, default="\n", help="Starting text")
+    parser.add_argument("--max-tokens", type=int, default=500, help="Tokens to generate")
+    parser.add_argument("--temperature", type=float, default=0.8, help="Sampling temperature")
+    parser.add_argument("--top-k", type=int, default=None, help="Top-k sampling")
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=str(CHECKPOINT_DIR / "best.pt"),
+        help="Path to model checkpoint",
     )
     args = parser.parse_args()
 
@@ -245,13 +257,15 @@ def main():
     model, tokenizer = load_model(Path(args.checkpoint), device)
 
     text = generate(
-        model, tokenizer,
+        model,
+        tokenizer,
         prompt=args.prompt,
         max_new_tokens=args.max_tokens,
         temperature=args.temperature,
         top_k=args.top_k,
         device=device,
     )
+
     print("\n" + "=" * 60)
     print(text)
     print("=" * 60)
@@ -263,7 +277,7 @@ if __name__ == "__main__":
 
 \shelltag
 \begin{lstlisting}[language=bash]
-uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8
+uv run python -m babygpt.generate --prompt "ROMEO:" --temperature 0.8
 \end{lstlisting}
 
 \checkpoint{You should see several lines of Shakespeare-like text with correct dialogue formatting (character names in caps followed by colons) and quasi-Elizabethan vocabulary. Try different temperatures: 0.5 for conservative output, 1.2 for more creative.}
@@ -274,7 +288,7 @@ The quality of generated text varies significantly with temperature. Here is wha
 
 \textbf{Temperature 0.5} (conservative): Correct spelling and formatting, but repetitive. The same phrases recur.
 
-\textbf{Temperature 0.8} (recommended): Good balance of coherence and variety. The default in \code{src/generate.py}.
+\textbf{Temperature 0.8} (recommended): Good balance of coherence and variety. The default in \code{babygpt/generate.py}.
 
 \textbf{Temperature 1.2} (creative): More surprising choices, but more spelling errors and occasional gibberish.
 
@@ -312,29 +326,27 @@ These are exactly the insights behind the GPT scaling papers. The architecture w
 
 \bigskip
 
-This concludes the six-document series. The full pipeline --- from the attention mechanism to a trained, generating language model --- is implemented in \code{src/}.
+This concludes the six-chapter series. The full pipeline --- from the attention mechanism to a trained, generating language model --- is implemented in \code{babygpt/}.
 
 \section{Project Summary}
 
 At this point your project directory should contain:
 
 \begin{verbatim}
-learn-attn-code/
+learn-attn-impl/
   pyproject.toml, ... uv files
-  src/
+  babygpt/
     __init__.py
-    config.py       (Document 04)
-    model.py        (Document 04)
-    tokenizer.py    (Document 05)
-    dataset.py      (Document 05)
-    train.py        (Document 05)
-    generate.py     (Document 06)
+    config.py       (Chapter~4)
+    model.py        (Chapter~4)
+    tokenizer.py    (Chapter~5)
+    dataset.py      (Chapter~5)
+    train.py        (Chapter~5)
+    generate.py     (Chapter~6)
   data/
-    tinyshakespeare.txt  (downloaded by src/dataset.py)
+    tinyshakespeare.txt
   checkpoints/
-    best.pt         (saved by src/train.py)
+    best.pt         (saved by babygpt/train.py)
 \end{verbatim}
 
 The model is 10.7M parameters, trained on 1MB of Shakespeare, generating character-level text. The same architecture --- with more parameters, subword tokenization, and more data --- is what powers GPT-2, GPT-3, and their successors.
-
-\end{document}

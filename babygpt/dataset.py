@@ -5,33 +5,33 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from src.tokenizer import CharTokenizer
-from src.config import GPTConfig
+from .tokenizer import CharTokenizer
+from .config import GPTConfig
 
 DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "tinyshakespeare.txt"
 
 
 class ShakespeareDataset(Dataset):
-    """Yields (x, y) pairs where x = chunk[:-1] and y = chunk[1:].
+    """Yields (input, target) pairs where input = chunk[:-1] and target = chunk[1:].
 
-    Each sample is a contiguous slice of block_size+1 characters from the
-    encoded text. The input x is the first block_size tokens; the target y
-    is the same window shifted right by one position. Every position in x
-    provides one next-token prediction training example.
+    Each sample is a contiguous slice of context_size+1 characters from the
+    encoded text. The input is the first context_size tokens; the target
+    is the same window shifted right by one position. Every position in the
+    input provides one next-token prediction training example.
     """
 
-    def __init__(self, data: torch.Tensor, block_size: int):
+    def __init__(self, data: torch.Tensor, context_size: int) -> None:
         self.data = data
-        self.block_size = block_size
+        self.context_size = context_size
 
     def __len__(self) -> int:
-        return len(self.data) - self.block_size
+        return len(self.data) - self.context_size
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        chunk = self.data[idx : idx + self.block_size + 1]
-        x = chunk[:-1]  # (block_size,)
-        y = chunk[1:]   # (block_size,)
-        return x, y
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        chunk = self.data[index : index + self.context_size + 1]
+        inputs = chunk[:-1]   # (context_size,)
+        targets = chunk[1:]   # (context_size,)
+        return inputs, targets
 
 
 def get_dataloaders(
@@ -51,8 +51,8 @@ def get_dataloaders(
     train_data = data[:split]
     val_data = data[split:]
 
-    train_dataset = ShakespeareDataset(train_data, config.block_size)
-    val_dataset = ShakespeareDataset(val_data, config.block_size)
+    train_dataset = ShakespeareDataset(train_data, config.context_size)
+    val_dataset = ShakespeareDataset(val_data, config.context_size)
 
     train_loader = DataLoader(
         train_dataset,
@@ -76,12 +76,12 @@ def get_dataloaders(
 
 if __name__ == "__main__":
     text = DATA_FILE.read_text()
-    tok = CharTokenizer(text)
+    tokenizer = CharTokenizer(text)
     print(f"Characters: {len(text):,}")
-    print(f"Vocab size: {tok.vocab_size}")
-    print(f"Vocab: {''.join(sorted(tok.char_to_idx.keys()))!r}")
+    print(f"Vocab size: {tokenizer.vocab_size}")
+    print(f"Vocab: {''.join(sorted(tokenizer.char_to_index.keys()))!r}")
 
-    data = torch.tensor(tok.encode(text), dtype=torch.long)
+    data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
     split = int(0.9 * len(data))
     print(f"Train tokens: {split:,}")
     print(f"Val tokens:   {len(data) - split:,}")

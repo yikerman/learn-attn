@@ -1,6 +1,4 @@
-\input{preamble}
-\begin{document}
-\docheader{Attention from First Principles}{1}
+\chapter{Attention from First Principles}
 
 \section{Project Setup}
 
@@ -13,17 +11,17 @@ uv init
 uv add torch
 \end{lstlisting}
 
-This gives you a Python environment with PyTorch (and the documents assume a CUDA device present). All demo code in Documents 01--03 can be run in a Python REPL (\code{uv run python}). Starting in Document 04, we will create the actual project source files.
+This gives you a Python environment with PyTorch (and the documents assume a CUDA device present). All demo code in Chapters~1--3 can be run in a Python REPL (\code{uv run python}). Starting in Chapter~4, we will create the actual project source files.
 
 \checkpoint{Run \code{uv run python -c "import torch; print(torch.cuda.is\_available())"} --- it should print \code{True}.}
 
-This document derives scaled dot-product attention from the ground up, builds multi-head attention on top of it, and introduces the causal mask needed for language modeling. By the end, every line of \code{CausalSelfAttention} in \code{src/model.py} should make sense.
+This document derives scaled dot-product attention from the ground up, builds multi-head attention on top of it, and introduces the causal mask needed for language modeling. By the end, every line of \code{CausalSelfAttention} in \code{babygpt/model.py} should make sense.
 
 \bigskip\hrule\bigskip
 
 \section{What Problem Does Attention Solve?}
 
-Consider a sequence of $T$ token embeddings, each a vector in $\mathbb{R}^d$. (How tokens become vectors is covered in Document~03, Section~5. For now, just accept that each token is represented as a $d$-dimensional vector.) Every position in the sequence carries some meaning, but meaning in language is deeply contextual --- the word ``bank'' means something different depending on whether ``river'' or ``account'' appears nearby. So each position needs a mechanism to gather information from other positions.
+Consider a sequence of $T$ token embeddings, each a vector in $\mathbb{R}^d$. (How tokens become vectors is covered in Chapter~3, Section~5. For now, just accept that each token is represented as a $d$-dimensional vector.) Every position in the sequence carries some meaning, but meaning in language is deeply contextual --- the word ``bank'' means something different depending on whether ``river'' or ``account'' appears nearby. So each position needs a mechanism to gather information from other positions.
 
 Before attention, the dominant approach was recurrent neural networks (RNNs). An RNN processes a sequence left to right, maintaining a hidden state that gets updated at each step. This has two problems:
 
@@ -256,7 +254,7 @@ Interpreting each row:
   \item \textbf{Position 2} --- its query matches all three keys roughly equally (scores were all~1 in Section~3), so attention is nearly uniform. The output $[0.50, 0.50]$ is close to the simple average $\frac{1}{3}(V_0 + V_1 + V_2)$.
 \end{itemize}
 
-\textbf{The big picture.} The attention output is not the final embedding --- it is a \emph{context-aware update}. In the full transformer (Document~02), this output is added back to the original embedding via a residual connection: $\mathbf{x} \leftarrow \mathbf{x} + \mathrm{Attention}(\mathbf{x})$. So each position's embedding starts as ``what this token means in isolation'' and gets enriched with ``what the surrounding context says is relevant.'' Stack multiple layers of this, and the embeddings progressively absorb more and more contextual information.
+\textbf{The big picture.} The attention output is not the final embedding --- it is a \emph{context-aware update}. In the full transformer (Chapter~2), this output is added back to the original embedding via a residual connection: $\mathbf{x} \leftarrow \mathbf{x} + \mathrm{Attention}(\mathbf{x})$. So each position's embedding starts as ``what this token means in isolation'' and gets enriched with ``what the surrounding context says is relevant.'' Stack multiple layers of this, and the embeddings progressively absorb more and more contextual information.
 
 \tip{Since $d_k$ equals the embedding dimension, the attention output has the same shape as the input --- $(T, d_k)$ --- so the residual add works directly.}
 
@@ -284,7 +282,7 @@ where $W^O$ is $(d_{\text{model}}, d_{\text{model}})$.
 
 Each head operates in a $d_k$-dimensional subspace. Head 1 might learn to attend based on syntactic structure; head 2 might attend to nearby positions; head 3 might track coreference. The output projection $W^O$ learns to combine these different views.
 
-The following snippets show how multi-head attention works step by step inside \code{CausalSelfAttention} in \code{src/model.py}, which we will create in Document~04.
+The following snippets show how multi-head attention works step by step inside \code{CausalSelfAttention} in \code{babygpt/model.py}, which we will create in Chapter~4.
 
 \begin{enumerate}
   \item \textbf{Project to Q, K, V.} Three separate weight matrices $W^Q, W^K, W^V$, each of shape $(d_{\text{model}}, d_{\text{model}})$, produce the queries, keys, and values:
@@ -333,7 +331,7 @@ y = self.c_proj(y)  # (B, T, d_model)
 
 \textbf{Parameter count.} We have four weight matrices of shape $(d_{\text{model}}, d_{\text{model}})$: $W^Q$, $W^K$, $W^V$, and the output projection $W^O$. Total: $4 \cdot d_{\text{model}}^2$ parameters (ignoring biases). For our BabyGPT with $d_{\text{model}} = 384$, that is $4 \times 384^2 = 589{,}824$ parameters per attention layer.
 
-You can see this exact implementation in \code{src/model.py} in the \code{CausalSelfAttention} class. The three projections are \code{self.W\_Q}, \code{self.W\_K}, \code{self.W\_V}, and the output projection is \code{self.c\_proj}. The attention computation uses the same scaling, masking, softmax, and matrix multiply from Section~6.
+You can see this exact implementation in \code{babygpt/model.py} in the \code{CausalSelfAttention} class. The three projections are \code{self.W\_Q}, \code{self.W\_K}, \code{self.W\_V}, and the output projection is \code{self.c\_proj}. The attention computation uses the same scaling, masking, softmax, and matrix multiply from Section~6.
 
 \bigskip\hrule\bigskip
 
@@ -377,9 +375,9 @@ After masking and softmax, the weight matrix looks like:
 
 Each row sums to 1, and all entries above the diagonal are exactly 0. Every position attends only to itself and to the past.
 
-In \code{src/model.py}, the causal mask is constructed with \code{torch.tril} and applied before softmax, exactly as shown above:
+In \code{babygpt/model.py}, the causal mask is constructed with \code{torch.tril} and applied before softmax, exactly as shown above:
 
-This is how it appears in the final \code{src/model.py}.
+This is how it appears in the final \code{babygpt/model.py}.
 
 \concepttag
 \begin{lstlisting}
@@ -407,6 +405,4 @@ But attention alone is not a transformer. It is one sublayer in a larger block t
   \item \textbf{A feed-forward network} --- a position-wise MLP that gives each position capacity to process its attended representation.
 \end{itemize}
 
-The next document, \textit{02~---~The Transformer Block}, shows how these components wrap around attention to form the repeating unit of the transformer architecture.
-
-\end{document}
+The next chapter, \textit{The Transformer Block}, shows how these components wrap around attention to form the repeating unit of the transformer architecture.

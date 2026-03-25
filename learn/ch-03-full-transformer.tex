@@ -1,8 +1,6 @@
-\input{preamble}
-\begin{document}
-\docheader{The Full Transformer (Encoder-Decoder)}{3}
+\chapter{The Full Transformer (Encoder-Decoder)}
 
-By now you understand the building blocks: scaled dot-product attention, multi-head attention, feed-forward networks, residual connections, and layer normalization. Documents 01 and 02 showed how these components form a transformer block. This document steps back to the original architecture from ``Attention Is All You Need'' (Vaswani et al., 2017) and explains how those blocks are arranged into a full encoder-decoder model for machine translation.
+By now you understand the building blocks: scaled dot-product attention, multi-head attention, feed-forward networks, residual connections, and layer normalization. Chapters~1 and~2 showed how these components form a transformer block. This document steps back to the original architecture from ``Attention Is All You Need'' (Vaswani et al., 2017) and explains how those blocks are arranged into a full encoder-decoder model for machine translation.
 
 We are not building this architecture ourselves --- our BabyGPT will use only the decoder half. But understanding the full picture is necessary to appreciate what GPT keeps, what it drops, and why.
 
@@ -39,7 +37,7 @@ Input Tokens -> Embedding + Positional Encoding
 
 $B$ is the batch size (number of sentences processed in parallel), $T_{\text{src}}$ is the length of the source sequence (number of input tokens after padding), and $d_{\text{model}}$ is the embedding dimension --- the width of every hidden representation in the model (512 in the base transformer).
 
-The critical difference from the decoder blocks in Document 02: \textbf{there is no causal mask}. Every position can attend to every other position. This is \textbf{bidirectional} attention --- position 5 can look at position 10, and position 10 can look at position 5.
+The critical difference from the decoder blocks in Chapter~2: \textbf{there is no causal mask}. Every position can attend to every other position. This is \textbf{bidirectional} attention --- position 5 can look at position 10, and position 10 can look at position 5.
 
 Why bidirectional? The encoder processes the entire input at once. When translating ``The cat sat on the mat'' from English to German, the encoder already has the complete input sentence. There is no reason to hide any positions from each other. The word ``cat'' should be able to use context from ``mat'' at the end of the sentence, and vice versa. Restricting the encoder to only look leftward (as a causal mask does) would throw away useful information for no benefit.
 
@@ -52,7 +50,7 @@ The output of the encoder is a tensor of shape \code{(B, T\_src, d\_model)}: a s
 The decoder is also a stack of $N = 6$ identical layers, but each decoder layer has \textbf{three} sublayers (not two):
 
 \begin{enumerate}
-  \item \textbf{Masked multi-head self-attention} (with causal mask --- same as our GPT blocks from Document 02)
+  \item \textbf{Masked multi-head self-attention} (with causal mask --- same as our GPT blocks from Chapter~2)
   \item \textbf{Multi-head cross-attention} (queries from the decoder, keys and values from the encoder output)
   \item \textbf{Position-wise feed-forward network}
 \end{enumerate}
@@ -73,7 +71,7 @@ Target Tokens -> Embedding + Positional Encoding
 
 Cross-attention is the mechanism that connects encoder and decoder. It is the reason the decoder can generate output that is conditioned on the input --- without it, the decoder would just be a language model with no knowledge of the source sentence.
 
-Cross-attention uses the exact same multi-head attention mechanism from Document 01, but the queries, keys, and values come from different places:
+Cross-attention uses the exact same multi-head attention mechanism from Chapter~1, but the queries, keys, and values come from different places:
 
 \begin{itemize}
   \item \textbf{Queries (Q):} from the decoder's current state (the output of the masked self-attention sublayer)
@@ -111,7 +109,7 @@ Each row of the embedding matrix corresponds to one token in the vocabulary. The
 
 The original paper uses a \textbf{shared embedding matrix} for both the encoder and decoder. This makes sense when the source and target languages share a vocabulary (common with subword tokenization schemes like BPE, which construct a joint vocabulary across both languages).
 
-BPE is covered in detail in Document 05, Section 1. Sharing means the model uses one set of embedding vectors for, say, the token ``the'' regardless of whether it appears on the source side or the target side.
+BPE is covered in detail in Chapter~5, Section 1. Sharing means the model uses one set of embedding vectors for, say, the token ``the'' regardless of whether it appears on the source side or the target side.
 
 \tip{%
 \textbf{The $\sqrt{d_{\text{model}}}$ scaling.} The paper multiplies embedding vectors by $\sqrt{d_{\text{model}}}$ before adding positional encodings. This is easy to miss but has a concrete reason. \code{nn.Embedding} initializes its weight matrix from a standard normal distribution, which gives vectors with entries roughly distributed as $\mathcal{N}(0, 1)$. The L2 norm of such a $d_{\text{model}}$-dimensional vector is approximately $\sqrt{d_{\text{model}}}$, meaning each component has magnitude roughly 1. But in practice, many implementations (including the paper's) initialize with variance closer to $1/d_{\text{model}}$, which gives per-component magnitudes of roughly $1/\sqrt{d_{\text{model}}}$. Meanwhile, the sinusoidal positional encodings (described next) have components bounded in $[-1, 1]$, so their per-component magnitude is \textasciitilde{}1. Without scaling, the positional encodings would dominate the token embeddings. Multiplying by $\sqrt{d_{\text{model}}}$ brings the embedding magnitudes up to the same scale as the positional encodings, so neither overwhelms the other.
@@ -178,7 +176,7 @@ The range of frequencies is geometric, spanning from $2\pi$ to $2\pi \times 1000
 
 where $M_k$ is a rotation matrix that depends only on $k$, not on $pos$. This means the model can learn to compute relative positions using linear operations on these encodings.
 
-\textbf{Why sinusoidal and not learned?} The paper argues that sinusoidal encodings may generalize to sequence lengths longer than those seen during training, since the sinusoidal functions are defined for any position. In practice, learned positional embeddings (as used in GPT-1 and GPT-2) work just as well for fixed-length contexts and are simpler to implement. Our BabyGPT in Document 04 will use learned positional embeddings.
+\textbf{Why sinusoidal and not learned?} The paper argues that sinusoidal encodings may generalize to sequence lengths longer than those seen during training, since the sinusoidal functions are defined for any position. In practice, learned positional embeddings (as used in GPT-1 and GPT-2) work just as well for fixed-length contexts and are simpler to implement. Our BabyGPT in Chapter~4 will use learned positional embeddings.
 
 A PyTorch implementation of sinusoidal positional encoding:
 
@@ -400,8 +398,6 @@ This schedule linearly increases the learning rate for the first \code{warmup\_s
 
 The encoder-decoder architecture is well-suited for sequence-to-sequence tasks where the input and output are distinct sequences (translation, summarization). But for \textbf{language modeling} --- the task of predicting the next token given preceding tokens --- the encoder and cross-attention are unnecessary overhead. There is no separate ``input'' to encode; the model just reads text and predicts what comes next.
 
-GPT (Radford et al., 2018) simplifies the transformer by keeping only the decoder (with its causal mask), removing the encoder and cross-attention entirely. What remains is a stack of transformer blocks, each containing masked self-attention and a feed-forward network --- exactly the blocks we built in Document 02.
+GPT (Radford et al., 2018) simplifies the transformer by keeping only the decoder (with its causal mask), removing the encoder and cross-attention entirely. What remains is a stack of transformer blocks, each containing masked self-attention and a feed-forward network --- exactly the blocks we built in Chapter~2.
 
-Document 04 makes this simplification explicit and assembles our BabyGPT.
-
-\end{document}
+Chapter~4 makes this simplification explicit and assembles our BabyGPT.

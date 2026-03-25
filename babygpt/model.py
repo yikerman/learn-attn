@@ -6,27 +6,27 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.config import GPTConfig
+from .config import GPTConfig
 
 
 class LayerNorm(nn.Module):
-    """Hand-written LayerNorm with optional bias (Document 02, Section 3).
+    """Hand-written LayerNorm with optional bias.
 
     LayerNorm(x) = gamma * (x - mean) / sqrt(var + eps) + beta
     Normalizes across the last dimension (features) per position.
     gamma (weight) and beta (bias) are learnable affine parameters.
     """
 
-    def __init__(self, config: GPTConfig, eps: float = 1e-5):
+    def __init__(self, config: GPTConfig, eps: float = 1e-5) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(config.n_embd))    # gamma
         self.bias = nn.Parameter(torch.zeros(config.n_embd)) if config.bias else None  # beta
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        mu = x.mean(dim=-1, keepdim=True)
-        sigma_sq = x.var(dim=-1, keepdim=True, unbiased=False)
-        x_normalized = (x - mu) / torch.sqrt(sigma_sq + self.eps)
+        mean = x.mean(dim=-1, keepdim=True)
+        variance = x.var(dim=-1, keepdim=True, unbiased=False)
+        x_normalized = (x - mean) / torch.sqrt(variance + self.eps)
         out = self.weight * x_normalized
         if self.bias is not None:
             out = out + self.bias
@@ -34,14 +34,14 @@ class LayerNorm(nn.Module):
 
 
 class CausalSelfAttention(nn.Module):
-    """Multi-head self-attention with causal mask (Document 01).
+    """Multi-head self-attention with causal mask.
 
     Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V
-    Runs h heads in parallel by reshaping into (B, h, T, d_k).
+    Runs h heads in parallel by reshaping into (batch, h, seq_len, d_k).
     Causal mask sets future positions to -inf before softmax.
     """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # Each projection is (n_embd, n_embd), i.e. (384, 384).
@@ -58,36 +58,36 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = config.n_embd // config.n_head  # d_k = 384/6 = 64
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.shape  # C = n_embd = 384
+        batch, seq_len, embed_dim = x.shape
 
         # Project then split into heads:
-        # (B, T, 384) -> (B, T, 384) -> view as (B, T, 6, 64) -> (B, 6, T, 64)
+        # (batch, seq_len, 384) -> view as (batch, seq_len, 6, 64) -> (batch, 6, seq_len, 64)
         # Each head gets its own 64-dim slice of Q, K, V.
-        q = self.W_Q(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        k = self.W_K(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        v = self.W_V(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        query = self.W_Q(x).view(batch, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        key = self.W_K(x).view(batch, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        value = self.W_V(x).view(batch, seq_len, self.n_head, self.head_dim).transpose(1, 2)
 
-        # Attention per head: (B, 6, T, 64) @ (B, 6, 64, T) -> (B, 6, T, T)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+        # Attention per head: (batch, 6, seq_len, 64) @ (batch, 6, 64, seq_len) -> (batch, 6, seq_len, seq_len)
+        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool))
         scores = scores.masked_fill(~mask, float('-inf'))
         weights = F.softmax(scores, dim=-1)
         weights = self.attn_dropout(weights)
-        y = torch.matmul(weights, v)  # (B, 6, T, 64)
+        attended = torch.matmul(weights, value)  # (batch, 6, seq_len, 64)
 
-        # Reassemble heads: (B, 6, T, 64) -> (B, T, 6, 64) -> (B, T, 384)
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.resid_dropout(self.c_proj(y))
+        # Reassemble heads: (batch, 6, seq_len, 64) -> (batch, seq_len, 6, 64) -> (batch, seq_len, 384)
+        attended = attended.transpose(1, 2).contiguous().view(batch, seq_len, embed_dim)
+        return self.resid_dropout(self.c_proj(attended))
 
 
 class FeedForward(nn.Module):
-    """Position-wise FFN with GELU (Document 02, Section 4).
+    """Position-wise FFN with GELU.
 
     FFN(x) = W2 * GELU(W1 * x)
     Hidden dim is 4x the embedding dim (expand then contract).
     """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
@@ -102,13 +102,13 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """Pre-norm transformer block (Document 02, Section 5).
+    """Pre-norm transformer block.
 
     x = x + Attention(LayerNorm(x))   -- pre-norm + residual
     x = x + FFN(LayerNorm(x))         -- pre-norm + residual
     """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         self.ln_1 = LayerNorm(config)
         self.attn = CausalSelfAttention(config)
@@ -122,20 +122,20 @@ class TransformerBlock(nn.Module):
 
 
 class BabyGPT(nn.Module):
-    """Decoder-only transformer language model (Document 04).
+    """Decoder-only transformer language model.
 
-    Forward: tok_emb + pos_emb -> N x TransformerBlock -> LayerNorm -> lm_head
+    Forward: token_emb + pos_emb -> N x TransformerBlock -> LayerNorm -> lm_head
     Loss: cross-entropy over vocab at every position (next-token prediction).
     Weight tying: lm_head shares weights with token embedding.
     """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
             wte=nn.Embedding(config.vocab_size, config.n_embd),
-            wpe=nn.Embedding(config.block_size, config.n_embd),
+            wpe=nn.Embedding(config.context_size, config.n_embd),
             drop=nn.Dropout(config.dropout),
             blocks=nn.ModuleList(
                 [TransformerBlock(config) for _ in range(config.n_layer)]
@@ -150,10 +150,10 @@ class BabyGPT(nn.Module):
         # Initialize weights
         self.apply(self._init_weights)
         # Scaled init for residual projections (GPT-2 convention)
-        for pn, p in self.named_parameters():
-            if pn.endswith("c_proj.weight"):
+        for param_name, param in self.named_parameters():
+            if param_name.endswith("c_proj.weight"):
                 nn.init.normal_(
-                    p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer)
+                    param, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer)
                 )
 
     def _init_weights(self, module: nn.Module) -> None:
@@ -166,22 +166,22 @@ class BabyGPT(nn.Module):
 
     def forward(
         self,
-        idx: torch.Tensor,
+        tokens: torch.Tensor,
         targets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        B, T = idx.shape
-        assert T <= self.config.block_size
-        pos = torch.arange(T, device=idx.device)
+        batch, seq_len = tokens.shape
+        assert seq_len <= self.config.context_size
+        positions = torch.arange(seq_len, device=tokens.device)
 
-        tok_emb = self.transformer.wte(idx)      # (B, T, n_embd)
-        pos_emb = self.transformer.wpe(pos)      # (T, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        token_emb = self.transformer.wte(tokens)       # (batch, seq_len, n_embd)
+        pos_emb = self.transformer.wpe(positions)       # (seq_len, n_embd)
+        x = self.transformer.drop(token_emb + pos_emb)
 
         for block in self.transformer.blocks:
             x = block(x)
 
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)                 # (B, T, vocab_size)
+        logits = self.lm_head(x)                        # (batch, seq_len, vocab_size)
 
         loss = None
         if targets is not None:
@@ -194,35 +194,38 @@ class BabyGPT(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        idx: torch.Tensor,
+        tokens: torch.Tensor,
         max_new_tokens: int,
         temperature: float = 1.0,
         top_k: int | None = None,
     ) -> torch.Tensor:
-        """Autoregressive token generation (Document 06, Sections 1-4).
+        """Autoregressive token generation.
 
         Loop: forward pass -> logits / temperature -> top-k filter
               -> softmax -> multinomial sample -> append token.
-        Crops to block_size when sequence exceeds context window.
+        Crops to context_size when sequence exceeds context window.
         """
         for _ in range(max_new_tokens):
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            tokens_cropped = (
+                tokens if tokens.size(1) <= self.config.context_size
+                else tokens[:, -self.config.context_size:]
+            )
 
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] / temperature  # (B, vocab_size)
+            logits, _ = self(tokens_cropped)
+            logits = logits[:, -1, :] / temperature  # (batch, vocab_size)
 
             if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float("-inf")
+                top_values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < top_values[:, [-1]]] = float("-inf")
 
             probs = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
-            idx = torch.cat([idx, next_token], dim=1)
+            next_token = torch.multinomial(probs, num_samples=1)  # (batch, 1)
+            tokens = torch.cat([tokens, next_token], dim=1)
 
-        return idx
+        return tokens
 
     def count_parameters(self) -> int:
         """Trainable parameters (excluding tied duplicates)."""
-        n = sum(p.numel() for p in self.parameters())
-        n -= self.lm_head.weight.numel()  # tied with wte
-        return n
+        total = sum(p.numel() for p in self.parameters())
+        total -= self.lm_head.weight.numel()  # tied with wte
+        return total

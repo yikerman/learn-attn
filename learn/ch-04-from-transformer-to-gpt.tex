@@ -1,6 +1,4 @@
-\input{preamble}
-\begin{document}
-\docheader{From the Transformer to GPT}{4}
+\chapter{From the Transformer to GPT}
 
 The original transformer is a general-purpose sequence-to-sequence architecture. GPT is what happens when you take the decoder half, throw away everything else, and train it to predict the next token. This document traces that path: which pieces survive, what changes, and why those changes matter.
 
@@ -10,7 +8,7 @@ The ``Attention Is All You Need'' architecture spawned three distinct families, 
 
 \subsection{Encoder-Decoder (Vaswani et al., 2017)}
 
-This is the full architecture from Document 03. The encoder processes the source sequence with bidirectional self-attention (every token attends to every other token). The decoder generates the target sequence one token at a time with causal self-attention (each token attends only to earlier tokens), plus cross-attention layers that let the decoder read the encoder's output.
+This is the full architecture from Chapter~3. The encoder processes the source sequence with bidirectional self-attention (every token attends to every other token). The decoder generates the target sequence one token at a time with causal self-attention (each token attends only to earlier tokens), plus cross-attention layers that let the decoder read the encoder's output.
 
 Use case: sequence-to-sequence tasks where the input and output are structurally different. Machine translation, summarization, speech-to-text.
 
@@ -24,7 +22,7 @@ Use case: understanding tasks where you have the full input available --- text c
 
 \subsection{Decoder-Only (GPT, Radford et al., 2018)}
 
-Keep only the decoder stack, and remove the cross-attention sublayer (since there is no encoder to attend to). Every layer is just causal self-attention followed by a feed-forward network --- exactly the transformer block from Document 02.
+Keep only the decoder stack, and remove the cross-attention sublayer (since there is no encoder to attend to). Every layer is just causal self-attention followed by a feed-forward network --- exactly the transformer block from Chapter~2.
 
 Training objective: \textbf{next-token prediction}. Given the sequence so far, predict the next token. The causal mask ensures each position can only see tokens before it.
 
@@ -40,7 +38,7 @@ GPT-2 demonstrated this with zero-shot task performance. GPT-3 (Brown et al., 20
 
 \section{What GPT Removes}
 
-Recall from Document 03 that the original decoder layer has three sublayers:
+Recall from Chapter~3 that the original decoder layer has three sublayers:
 
 \begin{enumerate}
   \item Masked multi-head self-attention
@@ -74,9 +72,9 @@ x                                        x
 output                                   output
 \end{verbatim}
 
-That is the entire structural difference. The self-attention and feed-forward sublayers work identically to what we built in Document 02.
+That is the entire structural difference. The self-attention and feed-forward sublayers work identically to what we built in Chapter~2.
 
-Compare the decoder-only architecture to the full encoder-decoder from Document 03 --- the entire left half and the cross-attention sublayer are gone:
+Compare the decoder-only architecture to the full encoder-decoder from Chapter~3 --- the entire left half and the cross-attention sublayer are gone:
 
 \begin{center}
 \begin{tikzpicture}[
@@ -151,16 +149,16 @@ Beyond removing cross-attention, GPT introduces several modifications that are n
 The original paper uses fixed sinusoidal positional encodings --- the position signal is computed from a formula and added to the token embeddings. GPT replaces this with a learned positional embedding: a plain \code{nn.Embedding} table with one vector per position.
 
 \concepttag
-{\small\itshape This line appears inside \code{BabyGPT.\_\_init\_\_} in \code{src/model.py}.}
+{\small\itshape This line appears inside \code{BabyGPT.\_\_init\_\_} in \code{babygpt/model.py}.}
 \begin{lstlisting}
 # Sinusoidal (original paper): computed from a formula, not learned
 # Learned (GPT): just another embedding table
-self.wpe = nn.Embedding(block_size, n_embd)  # shape: (256, 384)
+self.wpe = nn.Embedding(context_size, n_embd)  # shape: (256, 384)
 \end{lstlisting}
 
 The learned embedding for position \code{t} is looked up and added to the token embedding, just like the sinusoidal encoding was. The difference is that the model learns the position representations from data rather than having them fixed by a formula.
 
-Why this works: for a fixed maximum sequence length (our \code{block\_size=256}), there is no advantage to the sinusoidal formula. A learned embedding has enough capacity to represent any position pattern the model needs. The sinusoidal encoding was designed to generalize to longer sequences than seen during training (via extrapolation of the sinusoidal functions), but in practice this extrapolation does not work well, and most models are trained and used within a fixed context window.
+Why this works: for a fixed maximum sequence length (our \code{context\_size=256}), there is no advantage to the sinusoidal formula. A learned embedding has enough capacity to represent any position pattern the model needs. The sinusoidal encoding was designed to generalize to longer sequences than seen during training (via extrapolation of the sinusoidal functions), but in practice this extrapolation does not work well, and most models are trained and used within a fixed context window.
 
 \tip{%
 \textbf{\code{nn.Embedding} vs.\ \code{nn.Linear}.} An \code{Embedding(V, d)} is a lookup table: the input is an integer index, the output is the corresponding row of the weight matrix --- no multiplication, just \code{weight[index]}. A \code{Linear(d\_in, d\_out)} is a matrix multiply: the input is a continuous vector, the output is \code{x @ weight.T + bias}. The connection: if you one-hot encoded a token index and multiplied by a weight matrix, you would select exactly one row --- the same result as an Embedding lookup, but without materializing a sparse one-hot tensor. This is also why weight tying works: \code{lm\_head} (a Linear) computes \code{hidden @ wte.weight.T}, which dot-products the hidden state against every embedding row --- asking ``which embedding vector is this hidden state closest to?''
@@ -168,11 +166,11 @@ Why this works: for a fixed maximum sequence length (our \code{block\_size=256})
 
 \subsection{GELU Instead of ReLU}
 
-The original transformer uses ReLU in the feed-forward network. GPT replaces it with GELU, which is smooth everywhere and does not hard-zero negative inputs. This was covered in detail in Document~02, Section~4. Our \code{FeedForward} module uses \code{F.gelu}.
+The original transformer uses ReLU in the feed-forward network. GPT replaces it with GELU, which is smooth everywhere and does not hard-zero negative inputs. This was covered in detail in Chapter~2, Section~4. Our \code{FeedForward} module uses \code{F.gelu}.
 
 \subsection{Pre-Norm Instead of Post-Norm}
 
-The original paper applies LayerNorm \emph{after} the residual addition (post-norm). GPT applies it \emph{before} the sublayer (pre-norm), giving the residual connection a clean identity path for gradient flow. This was covered in detail in Document~02, Section~3. Our \code{TransformerBlock} uses pre-norm: \code{x = x + sublayer(layer\_norm(x))}.
+The original paper applies LayerNorm \emph{after} the residual addition (post-norm). GPT applies it \emph{before} the sublayer (pre-norm), giving the residual connection a clean identity path for gradient flow. This was covered in detail in Chapter~2, Section~3. Our \code{TransformerBlock} uses pre-norm: \code{x = x + sublayer(layer\_norm(x))}.
 
 \subsection{Weight Tying}
 
@@ -181,7 +179,7 @@ The token embedding matrix \code{wte} has shape \code{(vocab\_size, n\_embd)} --
 Weight tying forces them to share the same weight matrix:
 
 \concepttag
-{\small\itshape From \code{BabyGPT.\_\_init\_\_} in \code{src/model.py}.}
+{\small\itshape From \code{BabyGPT.\_\_init\_\_} in \code{babygpt/model.py}.}
 \begin{lstlisting}
 # In BabyGPT.__init__:
 self.transformer.wte.weight = self.lm_head.weight
@@ -190,7 +188,7 @@ self.transformer.wte.weight = self.lm_head.weight
 This means \code{lm\_head} computes logits as a dot product between the hidden state and the token embeddings. A token's logit is high when the hidden state is close to that token's embedding vector. This reduces the parameter count (one less \code{vocab\_size x n\_embd} matrix) and acts as regularization --- the model is encouraged to produce embeddings that are directly useful for prediction.
 
 \tip{%
-\textbf{If \code{lm\_head} shares weights with \code{wte}, how does it predict the \emph{next} token?} The hidden state at position $t$ \emph{starts} as the embedding of $x_t$, but 6 transformer blocks then transform it --- attention mixes in context from positions $0 \ldots t$, and feed-forward layers apply nonlinear transformations. By the time it exits the final LayerNorm, it is no longer ``the embedding of $x_t$.'' The loss function forces the transformer blocks to push that hidden vector \textbf{toward the embedding of $x_{t+1}$}, because the tied head computes $\text{logit}[i] = \text{dot}(\text{hidden}_t,\; \text{embedding}_i)$, and the loss rewards maximizing the logit for the correct next token. Think of the embedding space as a shared room where every character has a fixed address: the transformer blocks move the hidden state from near $x_t$'s address toward $x_{t+1}$'s address, and the tied head asks ``whose address are you closest to now?'' Document~05 covers the loss function in detail.
+\textbf{If \code{lm\_head} shares weights with \code{wte}, how does it predict the \emph{next} token?} The hidden state at position $t$ \emph{starts} as the embedding of $x_t$, but 6 transformer blocks then transform it --- attention mixes in context from positions $0 \ldots t$, and feed-forward layers apply nonlinear transformations. By the time it exits the final LayerNorm, it is no longer ``the embedding of $x_t$.'' The loss function forces the transformer blocks to push that hidden vector \textbf{toward the embedding of $x_{t+1}$}, because the tied head computes $\text{logit}[i] = \text{dot}(\text{hidden}_t,\; \text{embedding}_i)$, and the loss rewards maximizing the logit for the correct next token. Think of the embedding space as a shared room where every character has a fixed address: the transformer blocks move the hidden state from near $x_t$'s address toward $x_{t+1}$'s address, and the tied head asks ``whose address are you closest to now?'' Chapter~5 covers the loss function in detail.
 }
 
 \subsection{Dropout}
@@ -233,14 +231,14 @@ Note how this differs from the encoder-decoder objective. In machine translation
 
 \section{Our BabyGPT Architecture}
 
-The full model is in \code{src/model.py}. Here is the architecture with our specific configuration from \code{src/config.py}:
+The full model is in \code{babygpt/model.py}. Here is the architecture with our specific configuration from \code{babygpt/config.py}:
 
 \begin{center}
 \begin{tabular}{lll}
 \toprule
 Parameter & Value & Meaning \\
 \midrule
-\code{block\_size} & 256 & Maximum sequence length (context window) \\
+\code{context\_size} & 256 & Maximum sequence length (context window) \\
 \code{n\_layer} & 6 & Number of transformer blocks \\
 \code{n\_head} & 6 & Number of attention heads per block \\
 \code{n\_embd} & 384 & Embedding dimension ($d_{\text{model}}$) \\
@@ -271,21 +269,21 @@ The model is organized as a \code{ModuleDict} called \code{transformer} plus a s
 \subsection{Forward Pass}
 
 \concepttag
-{\small\itshape From \code{BabyGPT.forward} in \code{src/model.py}.}
+{\small\itshape From \code{BabyGPT.forward} in \code{babygpt/model.py}.}
 \begin{lstlisting}
-def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
-    B, T = idx.shape
-    pos = torch.arange(T, device=idx.device)
+def forward(self, tokens: torch.Tensor, targets: torch.Tensor | None = None):
+    batch, seq_len = tokens.shape
+    positions = torch.arange(seq_len, device=tokens.device)
 
-    tok_emb = self.transformer.wte(idx)     # (B, T, 384)
-    pos_emb = self.transformer.wpe(pos)     # (T, 384) -- broadcasts over batch
-    x = self.transformer.drop(tok_emb + pos_emb)
+    token_emb = self.transformer.wte(tokens)       # (batch, seq_len, 384)
+    pos_emb = self.transformer.wpe(positions)       # (seq_len, 384) -- broadcasts over batch
+    x = self.transformer.drop(token_emb + pos_emb)
 
     for block in self.transformer.blocks:
-        x = block(x)                         # 6 transformer blocks
+        x = block(x)                                # 6 transformer blocks
 
-    x = self.transformer.ln_f(x)            # final layer norm
-    logits = self.lm_head(x)                # (B, T, 65)
+    x = self.transformer.ln_f(x)                    # final layer norm
+    logits = self.lm_head(x)                        # (batch, seq_len, 65)
 
     loss = None
     if targets is not None:
@@ -296,10 +294,10 @@ def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
     return logits, loss
 \end{lstlisting}
 
-The input \code{idx} has shape \code{(B, T)} --- a batch of B sequences, each T tokens long. The output \code{logits} has shape \code{(B, T, 65)} --- a probability distribution over 65 characters at every position. When \code{targets} are provided, cross-entropy loss is computed and returned alongside the logits.
+The input \code{tokens} has shape \code{(batch, seq\_len)} --- a batch of sequences, each \code{seq\_len} tokens long. The output \code{logits} has shape \code{(batch, seq\_len, 65)} --- a probability distribution over 65 characters at every position. When \code{targets} are provided, cross-entropy loss is computed and returned alongside the logits.
 
 \tip{%
-\textbf{Why does each position predict the \emph{next} token?} The causal mask ensures position $t$ can only attend to tokens $x_0, \ldots, x_t$ --- it cannot see $x_{t+1}$ or beyond. So the hidden vector at position $t$ is a learned summary of the past. The loss function (covered in Document~05) compares position $t$'s output against the target $x_{t+1}$. Gradients flow backward and reshape the model so that each position's representation becomes useful for predicting what comes next --- because that is the only thing the loss ever rewards. The architecture does not force this; training does.
+\textbf{Why does each position predict the \emph{next} token?} The causal mask ensures position $t$ can only attend to tokens $x_0, \ldots, x_t$ --- it cannot see $x_{t+1}$ or beyond. So the hidden vector at position $t$ is a learned summary of the past. The loss function (covered in Chapter~5) compares position $t$'s output against the target $x_{t+1}$. Gradients flow backward and reshape the model so that each position's representation becomes useful for predicting what comes next --- because that is the only thing the loss ever rewards. The architecture does not force this; training does.
 }
 
 \section{Parameter Count}
@@ -322,7 +320,7 @@ The attention sublayer has three Q, K, V projections and one output projection:
 \end{itemize}
 
 \tip{%
-\textbf{How multi-head attention slices the matrices.} Each \code{W\_Q}, \code{W\_K}, \code{W\_V} projection is a single $(384, 384)$ matrix, but conceptually it is $h = 6$ separate $(384, 64)$ projections stacked side by side. The per-head dimension is $d_k = n_{\text{embd}} / h = 384 / 6 = 64$. In code, we project the full 384-dim vector first, then \code{view} the result as $(B, T, 6, 64)$ and \code{transpose} to $(B, 6, T, 64)$ --- giving each head its own 64-dim Q, K, V to run attention on independently. After attention, the 6 heads of 64 dims are concatenated back to 384 and passed through \code{c\_proj}. One big matrix multiply is equivalent to 6 small ones, but runs faster on a GPU because it is a single contiguous operation.
+\textbf{How multi-head attention slices the matrices.} Each \code{W\_Q}, \code{W\_K}, \code{W\_V} projection is a single $(384, 384)$ matrix, but conceptually it is $h = 6$ separate $(384, 64)$ projections stacked side by side. The per-head dimension is $d_k = n_{\text{embd}} / h = 384 / 6 = 64$. In code, we project the full 384-dim vector first, then \code{view} the result as \code{(batch, seq\_len, 6, 64)} and \code{transpose} to \code{(batch, 6, seq\_len, 64)} --- giving each head its own 64-dim Q, K, V to run attention on independently. After attention, the 6 heads of 64 dims are concatenated back to 384 and passed through \code{c\_proj}. One big matrix multiply is equivalent to 6 small ones, but runs faster on a GPU because it is a single contiguous operation.
 }
 
 The feed-forward sublayer has two linear layers with a 4x expansion:
@@ -360,7 +358,7 @@ Random initialization matters more than you might expect. If initial weights are
 \textbf{Standard weights:} All weight matrices and embeddings are initialized from a normal distribution with mean 0 and standard deviation 0.02:
 
 \concepttag
-{\small\itshape From \code{BabyGPT.\_\_init\_\_} and \code{BabyGPT.\_init\_weights} in \code{src/model.py}.}
+{\small\itshape From \code{BabyGPT.\_\_init\_\_} and \code{BabyGPT.\_init\_weights} in \code{babygpt/model.py}.}
 \begin{lstlisting}
 nn.init.normal_(module.weight, mean=0.0, std=0.02)
 \end{lstlisting}
@@ -368,7 +366,7 @@ nn.init.normal_(module.weight, mean=0.0, std=0.02)
 \textbf{Biases:} Initialized to zero (though our model has \code{bias=False}, so this only applies if you enable biases):
 
 \concepttag
-{\small\itshape From \code{BabyGPT.\_\_init\_\_} and \code{BabyGPT.\_init\_weights} in \code{src/model.py}.}
+{\small\itshape From \code{BabyGPT.\_\_init\_\_} and \code{BabyGPT.\_init\_weights} in \code{babygpt/model.py}.}
 \begin{lstlisting}
 nn.init.zeros_(module.bias)
 \end{lstlisting}
@@ -376,11 +374,11 @@ nn.init.zeros_(module.bias)
 \textbf{Residual projection scaling:} The output projection (\code{c\_proj}) in both the attention and feed-forward sublayers receives special treatment. These are the projections whose outputs get added back via the residual connection.
 
 \concepttag
-{\small\itshape From \code{BabyGPT.\_\_init\_\_} and \code{BabyGPT.\_init\_weights} in \code{src/model.py}.}
+{\small\itshape From \code{BabyGPT.\_\_init\_\_} in \code{babygpt/model.py}.}
 \begin{lstlisting}
-for pn, p in self.named_parameters():
-    if pn.endswith("c_proj.weight"):
-        nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
+for param_name, param in self.named_parameters():
+    if param_name.endswith("c_proj.weight"):
+        nn.init.normal_(param, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
 \end{lstlisting}
 
 The scaling factor is $1 / \sqrt{2N}$ where $N$ is the number of transformer blocks.
@@ -397,26 +395,27 @@ We now have everything we need to write the model code. Create two files:
 
 \subsection{Step 1: Configuration}
 
-\filetag{src/config.py}
+\filetag{babygpt/config.py}
 \begin{lstlisting}
 from dataclasses import dataclass
 
+
 @dataclass
 class GPTConfig:
-    block_size: int = 256
-    vocab_size: int = 65
-    n_layer: int = 6
-    n_head: int = 6
-    n_embd: int = 384
-    dropout: float = 0.2
-    bias: bool = False
+    context_size: int = 256     # max sequence length (context window)
+    vocab_size: int = 65        # number of unique tokens (characters in TinyShakespeare)
+    n_layer: int = 6            # number of transformer blocks
+    n_head: int = 6             # number of attention heads
+    n_embd: int = 384           # embedding dimension (d_model)
+    dropout: float = 0.2        # dropout rate (higher because dataset is small)
+    bias: bool = False          # use bias in Linear layers and LayerNorm
 \end{lstlisting}
 
 \subsection{Step 2: The Model}
 
-Create \code{src/model.py} with the complete implementation. Every class from the previous documents is collected here.
+Create \code{babygpt/model.py} with the complete implementation. Every class from the previous chapters is collected here.
 
-\filetag{src/model.py}
+\filetag{babygpt/model.py}
 \begin{lstlisting}
 """BabyGPT: a decoder-only transformer language model."""
 
@@ -426,27 +425,27 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.config import GPTConfig
+from .config import GPTConfig
 
 
 class LayerNorm(nn.Module):
-    """Hand-written LayerNorm with optional bias (Document 02, Section 3).
+    """Hand-written LayerNorm with optional bias.
 
     LayerNorm(x) = gamma * (x - mean) / sqrt(var + eps) + beta
     Normalizes across the last dimension (features) per position.
     gamma (weight) and beta (bias) are learnable affine parameters.
     """
 
-    def __init__(self, config, eps=1e-5):
+    def __init__(self, config: GPTConfig, eps: float = 1e-5) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(config.n_embd))    # gamma
         self.bias = nn.Parameter(torch.zeros(config.n_embd)) if config.bias else None  # beta
         self.eps = eps
 
-    def forward(self, x):
-        mu = x.mean(dim=-1, keepdim=True)
-        sigma_sq = x.var(dim=-1, keepdim=True, unbiased=False)
-        x_normalized = (x - mu) / torch.sqrt(sigma_sq + self.eps)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mean = x.mean(dim=-1, keepdim=True)
+        variance = x.var(dim=-1, keepdim=True, unbiased=False)
+        x_normalized = (x - mean) / torch.sqrt(variance + self.eps)
         out = self.weight * x_normalized
         if self.bias is not None:
             out = out + self.bias
@@ -454,14 +453,14 @@ class LayerNorm(nn.Module):
 
 
 class CausalSelfAttention(nn.Module):
-    """Multi-head self-attention with causal mask (Document 01).
+    """Multi-head self-attention with causal mask.
 
     Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V
-    Runs h heads in parallel by reshaping into (B, h, T, d_k).
+    Runs h heads in parallel by reshaping into (batch, h, seq_len, d_k).
     Causal mask sets future positions to -inf before softmax.
     """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # Each projection is (n_embd, n_embd), i.e. (384, 384).
@@ -478,36 +477,36 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = config.n_embd // config.n_head  # d_k = 384/6 = 64
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.shape  # C = n_embd = 384
+        batch, seq_len, embed_dim = x.shape
 
         # Project then split into heads:
-        # (B, T, 384) -> (B, T, 384) -> view as (B, T, 6, 64) -> (B, 6, T, 64)
+        # (batch, seq_len, 384) -> view as (batch, seq_len, 6, 64) -> (batch, 6, seq_len, 64)
         # Each head gets its own 64-dim slice of Q, K, V.
-        q = self.W_Q(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        k = self.W_K(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        v = self.W_V(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        query = self.W_Q(x).view(batch, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        key = self.W_K(x).view(batch, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        value = self.W_V(x).view(batch, seq_len, self.n_head, self.head_dim).transpose(1, 2)
 
-        # Attention per head: (B, 6, T, 64) @ (B, 6, 64, T) -> (B, 6, T, T)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+        # Attention per head: (batch, 6, seq_len, 64) @ (batch, 6, 64, seq_len) -> (batch, 6, seq_len, seq_len)
+        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool))
         scores = scores.masked_fill(~mask, float('-inf'))
         weights = F.softmax(scores, dim=-1)
         weights = self.attn_dropout(weights)
-        y = torch.matmul(weights, v)  # (B, 6, T, 64)
+        attended = torch.matmul(weights, value)  # (batch, 6, seq_len, 64)
 
-        # Reassemble heads: (B, 6, T, 64) -> (B, T, 6, 64) -> (B, T, 384)
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.resid_dropout(self.c_proj(y))
+        # Reassemble heads: (batch, 6, seq_len, 64) -> (batch, seq_len, 6, 64) -> (batch, seq_len, 384)
+        attended = attended.transpose(1, 2).contiguous().view(batch, seq_len, embed_dim)
+        return self.resid_dropout(self.c_proj(attended))
 
 
 class FeedForward(nn.Module):
-    """Position-wise FFN with GELU (Document 02, Section 4).
+    """Position-wise FFN with GELU.
 
     FFN(x) = W2 * GELU(W1 * x)
     Hidden dim is 4x the embedding dim (expand then contract).
     """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
@@ -522,13 +521,13 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """Pre-norm transformer block (Document 02, Section 5).
+    """Pre-norm transformer block.
 
     x = x + Attention(LayerNorm(x))   -- pre-norm + residual
     x = x + FFN(LayerNorm(x))         -- pre-norm + residual
     """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         self.ln_1 = LayerNorm(config)
         self.attn = CausalSelfAttention(config)
@@ -542,20 +541,20 @@ class TransformerBlock(nn.Module):
 
 
 class BabyGPT(nn.Module):
-    """Decoder-only transformer language model (this document).
+    """Decoder-only transformer language model.
 
-    Forward: tok_emb + pos_emb -> N x TransformerBlock -> LayerNorm -> lm_head
+    Forward: token_emb + pos_emb -> N x TransformerBlock -> LayerNorm -> lm_head
     Loss: cross-entropy over vocab at every position (next-token prediction).
     Weight tying: lm_head shares weights with token embedding.
     """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
             wte=nn.Embedding(config.vocab_size, config.n_embd),
-            wpe=nn.Embedding(config.block_size, config.n_embd),
+            wpe=nn.Embedding(config.context_size, config.n_embd),
             drop=nn.Dropout(config.dropout),
             blocks=nn.ModuleList(
                 [TransformerBlock(config) for _ in range(config.n_layer)]
@@ -570,10 +569,10 @@ class BabyGPT(nn.Module):
         # Initialize weights
         self.apply(self._init_weights)
         # Scaled init for residual projections (GPT-2 convention)
-        for pn, p in self.named_parameters():
-            if pn.endswith("c_proj.weight"):
+        for param_name, param in self.named_parameters():
+            if param_name.endswith("c_proj.weight"):
                 nn.init.normal_(
-                    p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer)
+                    param, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer)
                 )
 
     def _init_weights(self, module: nn.Module) -> None:
@@ -584,20 +583,24 @@ class BabyGPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
-        B, T = idx.shape
-        assert T <= self.config.block_size
-        pos = torch.arange(T, device=idx.device)
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        targets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        batch, seq_len = tokens.shape
+        assert seq_len <= self.config.context_size
+        positions = torch.arange(seq_len, device=tokens.device)
 
-        tok_emb = self.transformer.wte(idx)      # (B, T, n_embd)
-        pos_emb = self.transformer.wpe(pos)      # (T, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        token_emb = self.transformer.wte(tokens)       # (batch, seq_len, n_embd)
+        pos_emb = self.transformer.wpe(positions)       # (seq_len, n_embd)
+        x = self.transformer.drop(token_emb + pos_emb)
 
         for block in self.transformer.blocks:
             x = block(x)
 
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)                 # (B, T, vocab_size)
+        logits = self.lm_head(x)                        # (batch, seq_len, vocab_size)
 
         loss = None
         if targets is not None:
@@ -607,11 +610,44 @@ class BabyGPT(nn.Module):
             )
         return logits, loss
 
+    @torch.no_grad()
+    def generate(
+        self,
+        tokens: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+    ) -> torch.Tensor:
+        """Autoregressive token generation.
+
+        Loop: forward pass -> logits / temperature -> top-k filter
+              -> softmax -> multinomial sample -> append token.
+        Crops to context_size when sequence exceeds context window.
+        """
+        for _ in range(max_new_tokens):
+            tokens_cropped = (
+                tokens if tokens.size(1) <= self.config.context_size
+                else tokens[:, -self.config.context_size:]
+            )
+
+            logits, _ = self(tokens_cropped)
+            logits = logits[:, -1, :] / temperature  # (batch, vocab_size)
+
+            if top_k is not None:
+                top_values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < top_values[:, [-1]]] = float("-inf")
+
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)  # (batch, 1)
+            tokens = torch.cat([tokens, next_token], dim=1)
+
+        return tokens
+
     def count_parameters(self) -> int:
         """Trainable parameters (excluding tied duplicates)."""
-        n = sum(p.numel() for p in self.parameters())
-        n -= self.lm_head.weight.numel()  # tied with wte
-        return n
+        total = sum(p.numel() for p in self.parameters())
+        total -= self.lm_head.weight.numel()  # tied with wte
+        return total
 \end{lstlisting}
 
 \subsection{Step 3: Verify}
@@ -619,8 +655,8 @@ class BabyGPT(nn.Module):
 \shelltag
 \begin{lstlisting}[language=bash]
 uv run python -c "
-from src.config import GPTConfig
-from src.model import BabyGPT
+from babygpt.config import GPTConfig
+from babygpt.model import BabyGPT
 import torch
 model = BabyGPT(GPTConfig())
 print(f'Parameters: {model.count_parameters():,}')
@@ -631,5 +667,3 @@ print(f'Logits: {logits.shape}, Loss: {loss.item():.2f}')
 \end{lstlisting}
 
 \checkpoint{You should see \texttt{Parameters: 10,720,128} and a loss near 4.17 (which is $\ln(65)$, the random baseline for 65-class classification).}
-
-\end{document}

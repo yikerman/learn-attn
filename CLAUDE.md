@@ -6,8 +6,8 @@ Based on "Attention Is All You Need" (Vaswani et al., 2017) and Karpathy's nanoG
 Character-level language model trained on TinyShakespeare (~1.1M chars, 65 unique chars).
 
 ## Project Structure
-- `learn/` — 6 markdown documents explaining theory (01-06, ordered)
-- `src/` — Python package with model, tokenizer, dataset, training, generation
+- `learn/` — LaTeX tutorial (6 chapters assembled into one PDF via `babygpt-tutorial.tex`)
+- `babygpt/` — Python package with model, tokenizer, dataset, training, generation
 - `data/` — TinyShakespeare dataset
 - `CLAUDE.md` — this file
 
@@ -18,11 +18,11 @@ Character-level language model trained on TinyShakespeare (~1.1M chars, 65 uniqu
 
 ## Key Commands
 ```bash
-./build.sh                                                         # rebuild PDFs
-uv sync                                                            # install deps
-uv run python -m src.dataset                                       # download TinyShakespeare + print stats
-uv run python -m src.train                                         # train the model (~14 min on RTX 3080)
-uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8  # generate text
+./build.sh                                                                # rebuild PDF
+uv sync                                                                   # install deps
+uv run python -m babygpt.dataset                                          # download TinyShakespeare + print stats
+uv run python -m babygpt.train                                            # train the model (~14 min on RTX 3080)
+uv run python -m babygpt.generate --prompt "ROMEO:" --temperature 0.8     # generate text
 ```
 
 ## Model Config (BabyGPT)
@@ -45,26 +45,29 @@ uv run python -m src.generate --prompt "ROMEO:" --temperature 0.8  # generate te
 - **Character-level** tokenization — zero external deps, fully visible pipeline
 
 ## Writing Style for learn/ Documents
-- Audience: undergrad math (basic multivar calc, linear algerba), some ML/DL exposure
+- Audience: undergrad math (basic multivar calc, linear algebra), some ML/DL exposure
 - No silly metaphors. Expand math and engineering concepts clearly.
 - Pattern: math formula → plain English explanation → PyTorch code implementing it
-- Each document is self-contained but builds on previous ones
+- **Docs are self-contained**: a reader should be able to build the entire GPT from scratch by following the 6 chapters alone — `babygpt/` is the reference implementation, not the primary source. Every code listing tagged with `\filetag` must be identical to the corresponding code in `babygpt/`. When editing code, always update both the source files and the matching doc listings.
 
 ## Teaching Assistant Mode
 When the user asks questions while reading `learn/` documents:
 1. Pull ./the-annotated-transformer.txt into context. (It is scraped from the Annotated Transformer website and contains all the text and math formulas.)
 2. Answer the question in conversation.
-3. Record the answer as a **Tip** section inside the relevant `learn/` document, matching the document's existing writing style and tone.
+3. Record the answer as a **Tip** section inside the relevant `learn/` chapter file, matching the document's existing writing style and tone.
 4. Place the tip near the content that prompted the question so future readers benefit.
-5. Make sure documents' code are sync with `src/`.
+5. Make sure documents' code are sync with `babygpt/`.
 
-## Document Progression
-1. `01-attention-from-first-principles.md` — scaled dot-product attention, multi-head, masking
-2. `02-the-transformer-block.md` — residual connections, layer norm, FFN, block assembly
-3. `03-the-full-transformer.md` — encoder-decoder architecture from original paper
-4. `04-from-transformer-to-gpt.md` — decoder-only GPT, what changes and why
-5. `05-training.md` — data pipeline, optimizer, LR schedule, training loop
-6. `06-generation-and-sampling.md` — autoregressive generation, temperature, top-k
+## Document Structure
+The tutorial is a single PDF compiled from separate chapter files:
+- `learn/babygpt-tutorial.tex` — main file (title page, TOC, includes chapters)
+- `learn/preamble.tex` — shared LaTeX preamble
+- `learn/ch-01-attention.tex` — scaled dot-product attention, multi-head, masking
+- `learn/ch-02-transformer-block.tex` — residual connections, layer norm, FFN, block assembly
+- `learn/ch-03-full-transformer.tex` — encoder-decoder architecture from original paper
+- `learn/ch-04-from-transformer-to-gpt.tex` — decoder-only GPT, what changes and why
+- `learn/ch-05-training.tex` — data pipeline, optimizer, LR schedule, training loop
+- `learn/ch-06-generation.tex` — autoregressive generation, temperature, top-k
 
 ## Dependencies
 - torch (CUDA wheels)
@@ -72,5 +75,5 @@ When the user asks questions while reading `learn/` documents:
 
 ## Common Issues
 - If `uv sync` fails on torch, check that the PyTorch index URL matches your CUDA version
-- If training OOMs, reduce batch_size in src/train.py
+- If training OOMs, reduce batch_size in babygpt/train.py
 - Model checkpoints saved to `checkpoints/` directory

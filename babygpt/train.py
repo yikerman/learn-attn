@@ -2,15 +2,14 @@
 
 import argparse
 import math
-import os
 import time
 from pathlib import Path
 
 import torch
 
-from src.config import GPTConfig
-from src.dataset import get_dataloaders
-from src.model import BabyGPT
+from .config import GPTConfig
+from .dataset import get_dataloaders
+from .model import BabyGPT
 
 # ---- Hyperparameters ----
 BATCH_SIZE = 64
@@ -89,22 +88,22 @@ def estimate_loss(
 ) -> dict[str, float]:
     """Estimate train and val loss by averaging over eval_iters batches."""
     model.eval()
-    out = {}
-    for split, loader in [("train", train_loader), ("val", val_loader)]:
+    results = {}
+    for split_name, loader in [("train", train_loader), ("val", val_loader)]:
         losses = []
         loader_iter = iter(loader)
         for _ in range(eval_iters):
             try:
-                x, y = next(loader_iter)
+                inputs, targets = next(loader_iter)
             except StopIteration:
                 loader_iter = iter(loader)
-                x, y = next(loader_iter)
-            x, y = x.to(device), y.to(device)
-            _, loss = model(x, y)
+                inputs, targets = next(loader_iter)
+            inputs, targets = inputs.to(device), targets.to(device)
+            _, loss = model(inputs, targets)
             losses.append(loss.item())
-        out[split] = sum(losses) / len(losses)
+        results[split_name] = sum(losses) / len(losses)
     model.train()
-    return out
+    return results
 
 
 def train(args: argparse.Namespace) -> None:
@@ -145,7 +144,7 @@ def train(args: argparse.Namespace) -> None:
     best_val_loss = float("inf")
 
     train_iter = iter(train_loader)
-    t0 = time.time()
+    start_time = time.time()
 
     for step in range(args.max_iters):
         # Set learning rate for this step
@@ -155,15 +154,15 @@ def train(args: argparse.Namespace) -> None:
 
         # Get batch (cycle through loader)
         try:
-            x, y = next(train_iter)
+            inputs, targets = next(train_iter)
         except StopIteration:
             train_iter = iter(train_loader)
-            x, y = next(train_iter)
-        x, y = x.to(device), y.to(device)
+            inputs, targets = next(train_iter)
+        inputs, targets = inputs.to(device), targets.to(device)
 
         # Forward + backward with mixed precision
         with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
-            _, loss = model(x, y)
+            _, loss = model(inputs, targets)
 
         scaler.scale(loss).backward()
 
@@ -178,8 +177,8 @@ def train(args: argparse.Namespace) -> None:
         # Logging and evaluation
         if step % EVAL_INTERVAL == 0 or step == args.max_iters - 1:
             losses = estimate_loss(model, train_loader, val_loader, device)
-            elapsed = time.time() - t0
-            tokens_per_sec = (step + 1) * BATCH_SIZE * config.block_size / elapsed
+            elapsed = time.time() - start_time
+            tokens_per_sec = (step + 1) * BATCH_SIZE * config.context_size / elapsed
             print(
                 f"step {step:5d} | "
                 f"train loss {losses['train']:.4f} | "
@@ -196,7 +195,7 @@ def train(args: argparse.Namespace) -> None:
                     "config": config,
                     "step": step,
                     "val_loss": best_val_loss,
-                    "vocab": tokenizer.char_to_idx,
+                    "vocab": tokenizer.char_to_index,
                 }
                 torch.save(checkpoint, CHECKPOINT_DIR / "best.pt")
                 print(f"  -> saved checkpoint (val_loss={best_val_loss:.4f})")
@@ -207,17 +206,17 @@ def train(args: argparse.Namespace) -> None:
         "config": config,
         "step": args.max_iters,
         "val_loss": best_val_loss,
-        "vocab": tokenizer.char_to_idx,
+        "vocab": tokenizer.char_to_index,
     }
     torch.save(checkpoint, CHECKPOINT_DIR / "final.pt")
 
-    total_time = time.time() - t0
+    total_time = time.time() - start_time
     print(f"\nTraining complete in {total_time:.1f}s")
     print(f"Best val loss: {best_val_loss:.4f}")
     print(f"Checkpoints saved to {CHECKPOINT_DIR}")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Train BabyGPT on TinyShakespeare")
     parser.add_argument("--max-iters", type=int, default=MAX_ITERS)
     args = parser.parse_args()

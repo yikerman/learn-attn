@@ -1,6 +1,4 @@
-\input{preamble}
-\begin{document}
-\docheader{Training}{5}
+\chapter{Training}
 
 This document covers everything that happens between having a model and having a trained model: the data pipeline, the optimizer, the learning rate schedule, and the training loop. Each component has a clear mathematical motivation.
 
@@ -8,31 +6,35 @@ This document covers everything that happens between having a model and having a
 
 Before the model can process text, we need to convert characters to integers. TinyShakespeare contains approximately 1,115,394 characters drawn from a vocabulary of 65 unique characters (lowercase and uppercase letters, digits, punctuation, spaces, and newlines).
 
-Our tokenizer (in \code{src/tokenizer.py}) is the simplest possible: sort the unique characters, assign each an integer index, and store two lookup dictionaries.
+Our tokenizer (in \code{babygpt/tokenizer.py}) is the simplest possible: sort the unique characters, assign each an integer index, and store two lookup dictionaries.
 
-\filetag{src/tokenizer.py}
+\filetag{babygpt/tokenizer.py}
 \begin{lstlisting}
-class CharTokenizer:
-    """Character-level tokenizer (Section 1).
+"""Character-level tokenizer for TinyShakespeare."""
 
-    encode: string -> list of ints (one per character).
-    decode: list of ints -> string. Vocab = sorted unique chars.
+
+class CharTokenizer:
+    """Maps individual characters to integers and back.
+
+    This is the simplest possible tokenizer: the vocabulary is just the set of
+    unique characters in the training text. Each character gets a unique integer
+    ID. There are no subword units, no byte-pair encoding, no special tokens.
     """
 
-    def __init__(self, text: str):
+    def __init__(self, text: str) -> None:
         chars = sorted(set(text))
-        self.char_to_idx = {ch: i for i, ch in enumerate(chars)}
-        self.idx_to_char = {i: ch for i, ch in enumerate(chars)}
+        self.char_to_index = {ch: i for i, ch in enumerate(chars)}
+        self.index_to_char = {i: ch for i, ch in enumerate(chars)}
 
     @property
     def vocab_size(self) -> int:
-        return len(self.char_to_idx)
+        return len(self.char_to_index)
 
     def encode(self, text: str) -> list[int]:
-        return [self.char_to_idx[ch] for ch in text]
+        return [self.char_to_index[ch] for ch in text]
 
     def decode(self, tokens: list[int]) -> str:
-        return "".join(self.idx_to_char[t] for t in tokens)
+        return "".join(self.index_to_char[token] for token in tokens)
 \end{lstlisting}
 
 Encoding is a character-by-character lookup. Decoding is the reverse. That is the entire tokenizer.
@@ -209,9 +211,9 @@ This prevents the model from pushing logits toward $\pm\infty$ to achieve a perf
 
 \section{Building the Dataset}
 
-The data pipeline is in \code{src/dataset.py}. The key steps:
+The data pipeline is in \code{babygpt/dataset.py}. The key steps:
 
-{\small\itshape These snippets show the logic inside \code{src/dataset.py}, which you should create next.}
+{\small\itshape These snippets show the logic inside \code{babygpt/dataset.py}, which you should create next.}
 
 \textbf{1. Download and load.} First, download the TinyShakespeare text file into the \code{data/} directory:
 
@@ -241,15 +243,15 @@ train_data = data[:split]   # ~1,003,854 tokens
 val_data = data[split:]     # ~111,540 tokens
 \end{lstlisting}
 
-\textbf{3. Create training examples.} Each training example is a contiguous slice of \code{block\_size + 1 = 257} tokens. The input \code{x} is the first 256 tokens; the target \code{y} is the same window shifted right by one:
+\textbf{3. Create training examples.} Each training example is a contiguous slice of \code{context\_size + 1 = 257} tokens. The input \code{inputs} is the first 256 tokens; the target \code{targets} is the same window shifted right by one:
 
 \concepttag
 \begin{lstlisting}
-def __getitem__(self, idx):
-    chunk = self.data[idx : idx + self.block_size + 1]  # 257 tokens
-    x = chunk[:-1]   # tokens 0..255 -- the input
-    y = chunk[1:]     # tokens 1..256 -- the target
-    return x, y
+def __getitem__(self, index):
+    chunk = self.data[index : index + self.context_size + 1]  # 257 tokens
+    inputs = chunk[:-1]   # tokens 0..255 -- the input
+    targets = chunk[1:]     # tokens 1..256 -- the target
+    return inputs, targets
 \end{lstlisting}
 
 The dataset generates examples by \textbf{striding with step size 1}: item 0 starts at position 0, item 1 starts at position 1, item 2 at position 2, and so on. Consecutive items overlap by 256 of 257 tokens. This means almost every token in the corpus appears as a target in many different contexts.
@@ -289,9 +291,9 @@ The dataset generates examples by \textbf{striding with step size 1}: item 0 sta
 \end{tikzpicture}
 \end{center}
 
-The total number of items is \code{len(data) - block\_size}. For the training split: $1{,}003{,}854 - 256 = 1{,}003{,}598$ overlapping windows. The \code{DataLoader} shuffles these and draws batches of 64.
+The total number of items is \code{len(data) - context\_size}. For the training split: $1{,}003{,}854 - 256 = 1{,}003{,}598$ overlapping windows. The \code{DataLoader} shuffles these and draws batches of 64.
 
-Every position in \code{x} provides a training signal. Position 0 must predict position 1 (using only token 0 as context). Position 255 must predict position 256 (using all 256 tokens of context). A single \code{(x, y)} pair gives us 256 next-token prediction examples.
+Every position in \code{inputs} provides a training signal. Position 0 must predict position 1 (using only token 0 as context). Position 255 must predict position 256 (using all 256 tokens of context). A single \code{(inputs, targets)} pair gives us 256 next-token prediction examples.
 
 \textbf{4. DataLoader.} Standard PyTorch DataLoader wraps the dataset:
 
@@ -312,7 +314,7 @@ Each batch contains 64 sequences of length 256, giving $64 \times 256 = 16{,}384
 
 Create the tokenizer and dataset files. The tokenizer was shown above; here is the full dataset module:
 
-\filetag{src/dataset.py}
+\filetag{babygpt/dataset.py}
 \begin{lstlisting}
 """TinyShakespeare dataset: tokenize and create DataLoaders."""
 
@@ -321,33 +323,33 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from src.tokenizer import CharTokenizer
-from src.config import GPTConfig
+from .tokenizer import CharTokenizer
+from .config import GPTConfig
 
 DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "tinyshakespeare.txt"
 
 
 class ShakespeareDataset(Dataset):
-    """Yields (x, y) pairs where x = chunk[:-1] and y = chunk[1:].
+    """Yields (input, target) pairs where input = chunk[:-1] and target = chunk[1:].
 
-    Each sample is a contiguous slice of block_size+1 characters from the
-    encoded text. The input x is the first block_size tokens; the target y
-    is the same window shifted right by one position. Every position in x
-    provides one next-token prediction training example.
+    Each sample is a contiguous slice of context_size+1 characters from the
+    encoded text. The input is the first context_size tokens; the target
+    is the same window shifted right by one position. Every position in the
+    input provides one next-token prediction training example.
     """
 
-    def __init__(self, data: torch.Tensor, block_size: int):
+    def __init__(self, data: torch.Tensor, context_size: int) -> None:
         self.data = data
-        self.block_size = block_size
+        self.context_size = context_size
 
     def __len__(self) -> int:
-        return len(self.data) - self.block_size
+        return len(self.data) - self.context_size
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        chunk = self.data[idx : idx + self.block_size + 1]
-        x = chunk[:-1]  # (block_size,)
-        y = chunk[1:]   # (block_size,)
-        return x, y
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        chunk = self.data[index : index + self.context_size + 1]
+        inputs = chunk[:-1]   # (context_size,)
+        targets = chunk[1:]   # (context_size,)
+        return inputs, targets
 
 
 def get_dataloaders(
@@ -367,8 +369,8 @@ def get_dataloaders(
     train_data = data[:split]
     val_data = data[split:]
 
-    train_dataset = ShakespeareDataset(train_data, config.block_size)
-    val_dataset = ShakespeareDataset(val_data, config.block_size)
+    train_dataset = ShakespeareDataset(train_data, config.context_size)
+    val_dataset = ShakespeareDataset(val_data, config.context_size)
 
     train_loader = DataLoader(
         train_dataset,
@@ -392,12 +394,12 @@ def get_dataloaders(
 
 if __name__ == "__main__":
     text = DATA_FILE.read_text()
-    tok = CharTokenizer(text)
+    tokenizer = CharTokenizer(text)
     print(f"Characters: {len(text):,}")
-    print(f"Vocab size: {tok.vocab_size}")
-    print(f"Vocab: {''.join(sorted(tok.char_to_idx.keys()))!r}")
+    print(f"Vocab size: {tokenizer.vocab_size}")
+    print(f"Vocab: {''.join(sorted(tokenizer.char_to_index.keys()))!r}")
 
-    data = torch.tensor(tok.encode(text), dtype=torch.long)
+    data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
     split = int(0.9 * len(data))
     print(f"Train tokens: {split:,}")
     print(f"Val tokens:   {len(data) - split:,}")
@@ -405,7 +407,7 @@ if __name__ == "__main__":
 
 \shelltag
 \begin{lstlisting}[language=bash]
-uv run python -m src.dataset
+uv run python -m babygpt.dataset
 \end{lstlisting}
 
 \checkpoint{You should see: \texttt{Characters: 1,115,394}, \texttt{Vocab size: 65}, \texttt{Train tokens: 1,003,854}, \texttt{Val tokens: 111,540}.}
@@ -414,15 +416,15 @@ uv run python -m src.dataset
 
 \demotag
 \begin{lstlisting}
-from src.config import GPTConfig
-from src.dataset import get_dataloaders
+from babygpt.config import GPTConfig
+from babygpt.dataset import get_dataloaders
 
 config = GPTConfig()
 train_loader, val_loader, tok = get_dataloaders(config)
 
-x, y = next(iter(train_loader))          # one batch: (64, 256) each
-print("Input: ", tok.decode(x[0, :40].tolist()))
-print("Target:", tok.decode(y[0, :40].tolist()))
+inputs, targets = next(iter(train_loader))   # one batch: (64, 256) each
+print("Input: ", tok.decode(inputs[0, :40].tolist()))
+print("Target:", tok.decode(targets[0, :40].tolist()))
 
 # Output:
 # Input:  First Citizen:\nBefore we proceed any
@@ -520,10 +522,10 @@ where $\text{progress} = (t - \text{warmup\_iters}) / (\text{decay\_iters} - \te
 
 \section{The Training Loop}
 
-The training loop in \code{src/train.py} follows the standard PyTorch pattern, with mixed precision and gradient clipping. Here is the core of the loop, annotated step by step:
+The training loop in \code{babygpt/train.py} follows the standard PyTorch pattern, with mixed precision and gradient clipping. Here is the core of the loop, annotated step by step:
 
 \concepttag
-{\small\itshape From the main training loop in \code{src/train.py}.}
+{\small\itshape From the main training loop in \code{babygpt/train.py}.}
 \begin{lstlisting}
 for step in range(max_iters):
     # 1. Set learning rate for this step
@@ -532,12 +534,12 @@ for step in range(max_iters):
         param_group["lr"] = lr
 
     # 2. Get a batch from the DataLoader, move to GPU
-    x, y = next(train_iter)          # x: (64, 256), y: (64, 256)
-    x, y = x.to(device), y.to(device)
+    inputs, targets = next(train_iter)   # inputs: (64, 256), targets: (64, 256)
+    inputs, targets = inputs.to(device), targets.to(device)
 
     # 3. Forward pass with mixed precision
     with torch.amp.autocast("cuda", dtype=torch.float16, enabled=use_amp):
-        _, loss = model(x, y)
+        _, loss = model(inputs, targets)
 
     # 4. Backward pass with loss scaling
     scaler.scale(loss).backward()
@@ -574,7 +576,7 @@ The \code{torch.amp.autocast} context manager automatically casts operations to 
 \subsection{Gradient Clipping}
 
 \concepttag
-{\small\itshape From the main training loop in \code{src/train.py}.}
+{\small\itshape From the main training loop in \code{babygpt/train.py}.}
 \begin{lstlisting}
 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 \end{lstlisting}
@@ -592,7 +594,7 @@ Note: \code{scaler.unscale\_()} must be called before gradient clipping. Otherwi
 \subsection{Clearing Gradients}
 
 \concepttag
-{\small\itshape From the main training loop in \code{src/train.py}.}
+{\small\itshape From the main training loop in \code{babygpt/train.py}.}
 \begin{lstlisting}
 optimizer.zero_grad(set_to_none=True)
 \end{lstlisting}
@@ -604,7 +606,7 @@ PyTorch accumulates gradients by default --- calling \code{.backward()} adds to 
 Every 250 steps, the training loop evaluates the model on both training and validation data by averaging the loss over 200 batches:
 
 \concepttag
-{\small\itshape From the main training loop in \code{src/train.py}.}
+{\small\itshape From the main training loop in \code{babygpt/train.py}.}
 \begin{lstlisting}
 @torch.no_grad()
 def estimate_loss(model, train_loader, val_loader, device, eval_iters=200):
@@ -621,39 +623,38 @@ def estimate_loss(model, train_loader, val_loader, device, eval_iters=200):
 When the validation loss improves, the model state is saved:
 
 \concepttag
-{\small\itshape From the main training loop in \code{src/train.py}.}
+{\small\itshape From the main training loop in \code{babygpt/train.py}.}
 \begin{lstlisting}
 checkpoint = {
     "model": model.state_dict(),
     "config": config,
     "step": step,
     "val_loss": best_val_loss,
-    "vocab": tokenizer.char_to_idx,
+    "vocab": tokenizer.char_to_index,
 }
 torch.save(checkpoint, CHECKPOINT_DIR / "best.pt")
 \end{lstlisting}
 
-The checkpoint includes everything needed to reconstruct the model: the weights, the architecture config, and the vocabulary mapping. This is what \code{src/generate.py} loads to produce text.
+The checkpoint includes everything needed to reconstruct the model: the weights, the architecture config, and the vocabulary mapping. This is what \code{babygpt/generate.py} loads to produce text.
 
 \subsection{Running Training}
 
-Create \code{src/train.py} with the complete training script:
+Create \code{babygpt/train.py} with the complete training script:
 
-\filetag{src/train.py}
+\filetag{babygpt/train.py}
 \begin{lstlisting}
 """Training script for BabyGPT on TinyShakespeare."""
 
 import argparse
 import math
-import os
 import time
 from pathlib import Path
 
 import torch
 
-from src.config import GPTConfig
-from src.dataset import get_dataloaders
-from src.model import BabyGPT
+from .config import GPTConfig
+from .dataset import get_dataloaders
+from .model import BabyGPT
 
 # ---- Hyperparameters ----
 BATCH_SIZE = 64
@@ -732,22 +733,22 @@ def estimate_loss(
 ) -> dict[str, float]:
     """Estimate train and val loss by averaging over eval_iters batches."""
     model.eval()
-    out = {}
-    for split, loader in [("train", train_loader), ("val", val_loader)]:
+    results = {}
+    for split_name, loader in [("train", train_loader), ("val", val_loader)]:
         losses = []
         loader_iter = iter(loader)
         for _ in range(eval_iters):
             try:
-                x, y = next(loader_iter)
+                inputs, targets = next(loader_iter)
             except StopIteration:
                 loader_iter = iter(loader)
-                x, y = next(loader_iter)
-            x, y = x.to(device), y.to(device)
-            _, loss = model(x, y)
+                inputs, targets = next(loader_iter)
+            inputs, targets = inputs.to(device), targets.to(device)
+            _, loss = model(inputs, targets)
             losses.append(loss.item())
-        out[split] = sum(losses) / len(losses)
+        results[split_name] = sum(losses) / len(losses)
     model.train()
-    return out
+    return results
 
 
 def train(args: argparse.Namespace) -> None:
@@ -788,7 +789,7 @@ def train(args: argparse.Namespace) -> None:
     best_val_loss = float("inf")
 
     train_iter = iter(train_loader)
-    t0 = time.time()
+    start_time = time.time()
 
     for step in range(args.max_iters):
         # Set learning rate for this step
@@ -798,15 +799,15 @@ def train(args: argparse.Namespace) -> None:
 
         # Get batch (cycle through loader)
         try:
-            x, y = next(train_iter)
+            inputs, targets = next(train_iter)
         except StopIteration:
             train_iter = iter(train_loader)
-            x, y = next(train_iter)
-        x, y = x.to(device), y.to(device)
+            inputs, targets = next(train_iter)
+        inputs, targets = inputs.to(device), targets.to(device)
 
         # Forward + backward with mixed precision
         with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
-            _, loss = model(x, y)
+            _, loss = model(inputs, targets)
 
         scaler.scale(loss).backward()
 
@@ -821,8 +822,8 @@ def train(args: argparse.Namespace) -> None:
         # Logging and evaluation
         if step % EVAL_INTERVAL == 0 or step == args.max_iters - 1:
             losses = estimate_loss(model, train_loader, val_loader, device)
-            elapsed = time.time() - t0
-            tokens_per_sec = (step + 1) * BATCH_SIZE * config.block_size / elapsed
+            elapsed = time.time() - start_time
+            tokens_per_sec = (step + 1) * BATCH_SIZE * config.context_size / elapsed
             print(
                 f"step {step:5d} | "
                 f"train loss {losses['train']:.4f} | "
@@ -839,7 +840,7 @@ def train(args: argparse.Namespace) -> None:
                     "config": config,
                     "step": step,
                     "val_loss": best_val_loss,
-                    "vocab": tokenizer.char_to_idx,
+                    "vocab": tokenizer.char_to_index,
                 }
                 torch.save(checkpoint, CHECKPOINT_DIR / "best.pt")
                 print(f"  -> saved checkpoint (val_loss={best_val_loss:.4f})")
@@ -850,17 +851,17 @@ def train(args: argparse.Namespace) -> None:
         "config": config,
         "step": args.max_iters,
         "val_loss": best_val_loss,
-        "vocab": tokenizer.char_to_idx,
+        "vocab": tokenizer.char_to_index,
     }
     torch.save(checkpoint, CHECKPOINT_DIR / "final.pt")
 
-    total_time = time.time() - t0
+    total_time = time.time() - start_time
     print(f"\nTraining complete in {total_time:.1f}s")
     print(f"Best val loss: {best_val_loss:.4f}")
     print(f"Checkpoints saved to {CHECKPOINT_DIR}")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Train BabyGPT on TinyShakespeare")
     parser.add_argument("--max-iters", type=int, default=MAX_ITERS)
     args = parser.parse_args()
@@ -873,7 +874,7 @@ if __name__ == "__main__":
 
 \shelltag
 \begin{lstlisting}[language=bash]
-uv run python -m src.train
+uv run python -m babygpt.train
 \end{lstlisting}
 
 \checkpoint{On an RTX 3080 (10\,GB VRAM), training takes approximately \textbf{13 minutes} for 5000 iterations at \textbf{\textasciitilde{}103K tokens/sec}, using \textbf{\textasciitilde{}3.3\,GB peak VRAM} with mixed precision. You should see the loss drop from $\sim$4.17 to a best validation loss around \textbf{1.3--1.5}. The best checkpoint is saved to \code{checkpoints/best.pt}.
@@ -904,6 +905,4 @@ Parameter & Value & Rationale \\
 
 \bigskip
 
-\textbf{Next:} Document 06 --- Generation and Sampling covers autoregressive generation, temperature, top-k sampling, and what to expect from our trained model.
-
-\end{document}
+\textbf{Next:} Chapter~6 covers autoregressive generation, temperature, top-k sampling, and what to expect from our trained model.

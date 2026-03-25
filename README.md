@@ -7,6 +7,16 @@ The repository is generated as follows:
 1. I asked Claude Code to fetch Harvard's [The Annotated Transformer](https://nlp.seas.harvard.edu/annotated-transformer) and Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT), summarize and restructure them in a way that is easy to understand for someone with my background.
 2. I follow the docs generated and asked Claude Code to make edits as I go along, rinse and repeat.
 
+## Quick Start
+
+```bash
+uv sync                                                                # install deps
+uv run python -m babygpt.dataset                                       # print dataset stats
+uv run python -m babygpt.train                                         # train (~14 min on RTX 3080)
+uv run python -m babygpt.generate --prompt "ROMEO:" --temperature 0.8  # generate text
+./build.sh                                                             # rebuild tutorial PDF
+```
+
 ## Credits
 
 I cannot take credit for this repository which is based heavily on the work of others. I'd like to thank:
@@ -17,4 +27,4 @@ I cannot take credit for this repository which is based heavily on the work of o
 
 ## How is this not AI slop?
 
-I read everthing.
+I read everything.
