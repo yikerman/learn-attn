@@ -57,7 +57,7 @@ In attention, we assign each position two roles:
 
 The dot product $\mathbf{q} \cdot \mathbf{k}$ measures how well the query at one position matches the key at another. High dot product means high relevance.
 
-In practice, $\mathbf{q}$ and $\mathbf{k}$ are not stored directly --- they are produced by multiplying the token embedding $\mathbf{x}$ by learned weight matrices: $\mathbf{q} = \mathbf{x}\, W^Q$ and $\mathbf{k} = \mathbf{x}\, W^K$. The network learns these projections during training.
+In practice, $\mathbf{q}$ and $\mathbf{k}$ are not stored directly --- they are produced by multiplying the token embedding $\mathbf{x} \in \mathbb{R}^{d_{\text{model}}}$ by learned weight matrices: $\mathbf{q} = \mathbf{x}\, W^Q$ and $\mathbf{k} = \mathbf{x}\, W^K$, where $W^Q, W^K \in \mathbb{R}^{d_{\text{model}} \times d_k}$. These projections map from the $d_{\text{model}}$-dimensional embedding space into a separate $d_k$-dimensional \textbf{query-key space} where similarity is computed. In multi-head attention (Section~7), $d_k = d_{\text{model}} / h$ is typically much smaller than $d_{\text{model}}$; each head operates in its own low-dimensional subspace. The network learns these projections during training.
 
 \textbf{Concrete example.} Suppose we have 3 positions with query and key vectors in $\mathbb{R}^4$:
 
@@ -125,8 +125,6 @@ d_k = Q.size(-1)
 scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
 \end{lstlisting}
 
-There is a nice way to think about this: dividing by $\sqrt{d_k}$ is equivalent to setting the softmax \textbf{temperature} to $\sqrt{d_k}$. Higher temperature makes the distribution more uniform (softer attention); lower temperature makes it more peaked. By scaling, we ensure the temperature is calibrated regardless of dimension, so the model starts training with reasonable gradient flow.
-
 \bigskip\hrule\bigskip
 
 \section{Softmax Turns Scores into Weights}
@@ -158,8 +156,6 @@ The \code{dim=-1} means we apply softmax across the last dimension (the key dime
 
 \tip{Think of softmax as two steps: (1)~pass every element through $e^x$, which makes all values strictly positive \emph{and} amplifies larger values exponentially; (2)~divide each result by the sum of all of them, so the vector sums to~1. Step~1 is the nonlinearity that separates winners from losers; step~2 is just linear normalization.}
 
-\textbf{Connection to temperature.} More generally, softmax with temperature $\tau$ is $\mathrm{softmax}(\mathbf{z} / \tau)$. When $\tau$ is small, the distribution sharpens toward a one-hot on the maximum element. When $\tau$ is large, the distribution flattens toward uniform. The $\sqrt{d_k}$ scaling is exactly this: we implicitly set $\tau = \sqrt{d_k}$, preventing the distribution from being too sharp at initialization.
-
 \bigskip\hrule\bigskip
 
 \section{The Full Attention Formula}
@@ -190,7 +186,7 @@ The output has shape $(T, d_k)$. Each row $i$ of the output is a weighted averag
 
 \textbf{Complete implementation:}
 
-This standalone function shows the algorithm. Our project uses PyTorch's fused \code{F.scaled\_dot\_product\_attention} instead.
+This standalone function shows the algorithm in isolation.
 
 \demotag
 \begin{lstlisting}
@@ -225,14 +221,14 @@ A few things to note:
   \item The function is pure matrix multiplications and elementwise operations --- extremely GPU-friendly.
 \end{itemize}
 
-Let us run it. We reuse $Q$ and $K$ from Section~3 and define a simple $V$ where each position's value is a distinct 2D vector:
+Let us run it. We reuse $Q$ and $K$ from Section~3 and define $V$ with the same dimension ($d_k = 4$):
 
 \demotag
 \begin{lstlisting}
 V = torch.tensor([
-    [1.0, 0.0],  # value at position 0
-    [0.0, 1.0],  # value at position 1
-    [0.5, 0.5],  # value at position 2
+    [1.0, 0.0, 1.0, 0.0],  # value at position 0
+    [0.0, 1.0, 0.0, 1.0],  # value at position 1
+    [0.5, 0.5, 0.5, 0.5],  # value at position 2
 ])
 
 out = attention(Q, K, V)
@@ -241,22 +237,22 @@ print(out)
 
 \outputtag
 \begin{lstlisting}
-tensor([[0.6601, 0.3399],
-        [0.3399, 0.6601],
-        [0.5000, 0.5000]])
+tensor([[0.6601, 0.3399, 0.6601, 0.3399],
+        [0.3399, 0.6601, 0.3399, 0.6601],
+        [0.5000, 0.5000, 0.5000, 0.5000]])
 \end{lstlisting}
 
 Interpreting each row:
 
 \begin{itemize}
-  \item \textbf{Position 0} --- its query best matches its own key (Section~3), so it pulls mostly from $V_0 = [1, 0]$. The output $[0.66, 0.34]$ leans heavily toward $V_0$.
-  \item \textbf{Position 1} --- symmetric case. Its query best matches $K_1$, so it pulls mostly from $V_1 = [0, 1]$. The output $[0.34, 0.66]$ leans toward $V_1$.
-  \item \textbf{Position 2} --- its query matches all three keys roughly equally (scores were all~1 in Section~3), so attention is nearly uniform. The output $[0.50, 0.50]$ is close to the simple average $\frac{1}{3}(V_0 + V_1 + V_2)$.
+  \item \textbf{Position 0} --- its query best matches its own key (Section~3), so it pulls mostly from $V_0$. The output leans heavily toward $V_0 = [1, 0, 1, 0]$.
+  \item \textbf{Position 1} --- symmetric case. Its query best matches $K_1$, so it pulls mostly from $V_1 = [0, 1, 0, 1]$.
+  \item \textbf{Position 2} --- its query matches all three keys roughly equally (scores were all~1 in Section~3), so attention is nearly uniform. The output $[0.50, 0.50, 0.50, 0.50]$ is close to the simple average $\frac{1}{3}(V_0 + V_1 + V_2)$.
 \end{itemize}
 
 \textbf{The big picture.} The attention output is not the final embedding --- it is a \emph{context-aware update}. In the full transformer (Chapter~2), this output is added back to the original embedding via a residual connection: $\mathbf{x} \leftarrow \mathbf{x} + \mathrm{Attention}(\mathbf{x})$. So each position's embedding starts as ``what this token means in isolation'' and gets enriched with ``what the surrounding context says is relevant.'' Stack multiple layers of this, and the embeddings progressively absorb more and more contextual information.
 
-\tip{Since $d_k$ equals the embedding dimension, the attention output has the same shape as the input --- $(T, d_k)$ --- so the residual add works directly.}
+\tip{The attention output has shape $(T, d_k)$, which in general differs from the embedding dimension $d_{\text{model}}$. In multi-head attention (Section~7), the output projection $W^O$ maps the concatenated heads back to $d_{\text{model}}$, so the residual add works.}
 
 \bigskip\hrule\bigskip
 

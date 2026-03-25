@@ -225,7 +225,5 @@ class BabyGPT(nn.Module):
         return tokens
 
     def count_parameters(self) -> int:
-        """Trainable parameters (excluding tied duplicates)."""
-        total = sum(p.numel() for p in self.parameters())
-        total -= self.lm_head.weight.numel()  # tied with wte
-        return total
+        """Trainable parameters (tied weights counted once)."""
+        return sum(p.numel() for p in self.parameters())

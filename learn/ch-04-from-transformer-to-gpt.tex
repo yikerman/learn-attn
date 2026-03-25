@@ -644,10 +644,8 @@ class BabyGPT(nn.Module):
         return tokens
 
     def count_parameters(self) -> int:
-        """Trainable parameters (excluding tied duplicates)."""
-        total = sum(p.numel() for p in self.parameters())
-        total -= self.lm_head.weight.numel()  # tied with wte
-        return total
+        """Trainable parameters (tied weights counted once)."""
+        return sum(p.numel() for p in self.parameters())
 \end{lstlisting}
 
 \subsection{Step 3: Verify}
@@ -666,4 +664,4 @@ print(f'Logits: {logits.shape}, Loss: {loss.item():.2f}')
 "
 \end{lstlisting}
 
-\checkpoint{You should see \texttt{Parameters: 10,720,128} and a loss near 4.17 (which is $\ln(65)$, the random baseline for 65-class classification).}
+\checkpoint{You should see \texttt{Parameters: 10,745,088} and a loss near 4.17 (which is $\ln(65)$, the random baseline for 65-class classification).}
