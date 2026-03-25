@@ -13,6 +13,7 @@ import os
 import glob
 
 import requests
+from tqdm import tqdm
 
 
 # ---------------------------------------------------------------------------
@@ -53,11 +54,15 @@ def download_shard(idx: int) -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     response = requests.get(url, stream=True, timeout=60)
     response.raise_for_status()
+    total_size = int(response.headers.get("content-length", 0))
     # Write to a temp file first, then rename (atomic on POSIX)
     tmp_path = path + ".tmp"
     with open(tmp_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
-            f.write(chunk)
+        with tqdm(total=total_size, unit="B", unit_scale=True,
+                  desc=f"  Shard {idx}", leave=False) as pbar:
+            for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
+                f.write(chunk)
+                pbar.update(len(chunk))
     os.rename(tmp_path, path)
 
 
@@ -65,7 +70,7 @@ def download_shards(num_shards: int = 10) -> None:
     """Download parquet shards for training."""
     num_shards = min(num_shards, NUM_SHARDS_AVAILABLE)
     print(f"Downloading {num_shards} FineWeb-Edu shards to {DATA_DIR}")
-    for idx in range(num_shards):
+    for idx in tqdm(range(num_shards), desc="Shards", unit="shard"):
         download_shard(idx)
     print(f"Done. {num_shards} shards in {DATA_DIR}")
 

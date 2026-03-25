@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import torch
+from tqdm import tqdm
 
 from .config import GPTConfig
 from .dataset import get_dataloaders
@@ -146,7 +147,8 @@ def train(args: argparse.Namespace) -> None:
     train_iter = iter(train_loader)
     start_time = time.time()
 
-    for step in range(args.max_iters):
+    pbar = tqdm(range(args.max_iters), desc="Training", unit="step")
+    for step in pbar:
         # Set learning rate for this step
         lr = get_lr(step)
         for param_group in optimizer.param_groups:
@@ -174,12 +176,15 @@ def train(args: argparse.Namespace) -> None:
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
 
+        # Update progress bar with current loss
+        pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{lr:.2e}")
+
         # Logging and evaluation
         if step % EVAL_INTERVAL == 0 or step == args.max_iters - 1:
             losses = estimate_loss(model, train_loader, val_loader, device)
             elapsed = time.time() - start_time
             tokens_per_sec = (step + 1) * BATCH_SIZE * config.context_size / elapsed
-            print(
+            pbar.write(
                 f"step {step:5d} | "
                 f"train loss {losses['train']:.4f} | "
                 f"val loss {losses['val']:.4f} | "
@@ -198,7 +203,7 @@ def train(args: argparse.Namespace) -> None:
                     "vocab": tokenizer.char_to_index,
                 }
                 torch.save(checkpoint, CHECKPOINT_DIR / "best.pt")
-                print(f"  -> saved checkpoint (val_loss={best_val_loss:.4f})")
+                pbar.write(f"  -> saved checkpoint (val_loss={best_val_loss:.4f})")
 
     # Save final checkpoint
     checkpoint = {

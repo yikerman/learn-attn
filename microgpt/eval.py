@@ -18,6 +18,7 @@ import os
 
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from .config import GPTConfig
 from .model import MicroGPT
@@ -35,7 +36,8 @@ def compute_val_loss(
     model.eval()
     total_loss = 0.0
     count = 0
-    for i, (inputs, targets) in enumerate(val_loader):
+    for i, (inputs, targets) in enumerate(tqdm(val_loader, desc="Val loss",
+                                                total=num_batches, unit="batch")):
         if i >= num_batches:
             break
         _, loss = model(inputs, targets)
@@ -64,7 +66,8 @@ def compute_bpb(
     total_tokens = 0
     total_bytes = 0
 
-    for i, (inputs, targets) in enumerate(val_loader):
+    for i, (inputs, targets) in enumerate(tqdm(val_loader, desc="BPB",
+                                                total=num_batches, unit="batch")):
         if i >= num_batches:
             break
 

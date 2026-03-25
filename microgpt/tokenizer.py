@@ -21,6 +21,7 @@ import pickle
 import regex  # 're' doesn't support \p{L} Unicode categories; use 'regex'
 
 import tiktoken
+from tqdm import tqdm
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +90,29 @@ def _merge_pair(
     return out
 
 
+def _merge_chunk_inplace(
+    ids: list[int],
+    pair: tuple[int, int],
+    new_id: int,
+) -> list[int]:
+    """Replace pair in ids, returning new list. Optimized: skips chunks
+    that can't possibly contain the pair (short-circuit on length)."""
+    if len(ids) < 2:
+        return ids
+    out: list[int] = []
+    i = 0
+    a, b = pair
+    n = len(ids)
+    while i < n:
+        if i < n - 1 and ids[i] == a and ids[i + 1] == b:
+            out.append(new_id)
+            i += 2
+        else:
+            out.append(ids[i])
+            i += 1
+    return out
+
+
 def train_bpe(
     text: str,
     vocab_size: int,
@@ -106,6 +130,8 @@ def train_bpe(
         vocab_size: Target vocabulary size including the 256 byte tokens.
         verbose: Print progress every 1000 merges.
     """
+    import time
+
     assert vocab_size >= 256, "vocab_size must be >= 256 (the byte alphabet)"
     num_merges = vocab_size - 256 - len(SPECIAL_TOKENS)
     assert num_merges >= 0, "vocab_size too small to fit byte alphabet + special tokens"
@@ -114,6 +140,8 @@ def train_bpe(
     # This prevents merges from crossing word/number boundaries.
     pat = regex.compile(SPLIT_PATTERN)
     chunks = pat.findall(text)
+    if verbose:
+        print(f"  Pre-tokenized into {len(chunks):,} chunks")
 
     # Step 2: Convert each chunk to a list of raw byte values.
     chunk_ids_list: list[list[int]] = [
@@ -122,7 +150,10 @@ def train_bpe(
 
     # Step 3: Iteratively merge the most frequent adjacent pair.
     merges: list[tuple[tuple[int, int], int]] = []
-    for i in range(num_merges):
+    t0 = time.time()
+    pbar = tqdm(range(num_merges), desc="  BPE merges", unit="merge",
+                disable=not verbose)
+    for i in pbar:
         pair_counts = _get_pair_counts(chunk_ids_list)
         if not pair_counts:
             break  # nothing left to merge
@@ -130,18 +161,19 @@ def train_bpe(
         new_id = 256 + i
         # Apply the merge to every chunk
         chunk_ids_list = [
-            _merge_pair(ids, best_pair, new_id) for ids in chunk_ids_list
+            _merge_chunk_inplace(ids, best_pair, new_id) for ids in chunk_ids_list
         ]
         merges.append((best_pair, new_id))
-        if verbose and (i + 1) % 1000 == 0:
-            print(
-                f"  merge {i + 1}/{num_merges}: "
-                f"{best_pair} -> {new_id} "
-                f"(freq {pair_counts[best_pair]})"
-            )
+
+        if (i + 1) % 100 == 0 or i == num_merges - 1:
+            elapsed = time.time() - t0
+            rate = (i + 1) / elapsed if elapsed > 0 else 0
+            pbar.set_postfix(rate=f"{rate:.0f}/s")
 
     if verbose:
-        print(f"Trained {len(merges)} merges (vocab_size={256 + len(merges) + len(SPECIAL_TOKENS)})")
+        elapsed = time.time() - t0
+        print(f"  Done in {elapsed:.1f}s — "
+              f"{len(merges)} merges (vocab_size={256 + len(merges) + len(SPECIAL_TOKENS)})")
 
     return merges
 

@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from tqdm import tqdm
 
 from .config import GPTConfig
 from .model import MicroGPT
@@ -245,7 +246,9 @@ def train() -> None:
     t0 = time.time()
     tokens_processed = 0
 
-    for step in range(MAX_STEPS):
+    pbar = tqdm(range(MAX_STEPS), desc="Training", unit="step",
+                disable=not is_master(rank))
+    for step in pbar:
         # Set learning rate
         lr = get_lr(step)
         for pg in optimizer.param_groups:
@@ -279,11 +282,14 @@ def train() -> None:
         tokens_processed += effective_batch_tokens
 
         # ---- Logging & evaluation -----------------------------------------
+        dt = time.time() - t0
+        tok_per_sec = tokens_processed / dt if dt > 0 else 0
+        pbar.set_postfix(loss=f"{accum_loss:.4f}", lr=f"{lr:.2e}",
+                         tok_s=f"{tok_per_sec:,.0f}")
+
         if step % 50 == 0 or step == MAX_STEPS - 1:
-            dt = time.time() - t0
-            tok_per_sec = tokens_processed / dt if dt > 0 else 0
             mfu = estimate_mfu(raw_model, tok_per_sec, device)
-            print0(
+            pbar.write(
                 f"step {step:>6d}/{MAX_STEPS} | "
                 f"loss {accum_loss:.4f} | "
                 f"lr {lr:.2e} | "
@@ -293,7 +299,7 @@ def train() -> None:
 
         if (step + 1) % EVAL_INTERVAL == 0 or step == MAX_STEPS - 1:
             val_loss = evaluate(raw_model, val_loader, device, EVAL_STEPS)
-            print0(f"  val_loss: {val_loss:.4f}")
+            pbar.write(f"  val_loss: {val_loss:.4f}")
 
             if val_loss < best_val_loss and is_master(rank):
                 best_val_loss = val_loss
