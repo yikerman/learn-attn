@@ -67,18 +67,18 @@ import requests
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "microgpt")
 
-# FineWeb-Edu-score-2 sample: ~10B tokens total, split into 100 parquet files
-# Each shard is ~50-100 MB, containing ~100M tokens
+# FineWeb-Edu sample-10BT: ~10B tokens total, split into 14 parquet files
+# Each shard is ~2 GB on disk, containing ~700M tokens
 BASE_URL = (
-    "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu-score-2"
-    "/resolve/main/data/CC-MAIN-2024-10"
+    "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu"
+    "/resolve/main/sample/10BT"
 )
-# Shard filenames: train-00000-of-00099.parquet ... train-00098-of-00099.parquet
-NUM_SHARDS_AVAILABLE = 99
+# Shard filenames: 000_00000.parquet ... 013_00000.parquet
+NUM_SHARDS_AVAILABLE = 14
 
 
 def shard_filename(idx: int) -> str:
-    return f"train-{idx:05d}-of-{NUM_SHARDS_AVAILABLE:05d}.parquet"
+    return f"{idx:03d}_00000.parquet"
 
 
 def shard_path(idx: int) -> str:
@@ -122,8 +122,8 @@ def download_shards(num_shards: int = 10) -> None:
 
 def list_parquet_files() -> list[str]:
     """Return sorted list of all downloaded parquet shard paths."""
-    pattern = os.path.join(DATA_DIR, "train-*.parquet")
-    paths = sorted(glob.glob(pattern))
+    pattern = os.path.join(DATA_DIR, "*.parquet")
+    paths = sorted(p for p in glob.glob(pattern) if not p.endswith(".tmp"))
     return paths
 \end{lstlisting}
 
