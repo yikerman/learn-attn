@@ -1,0 +1,143 @@
+\chapter{Efficient Inference}
+\label{ch:inference}
+
+BabyGPT's \code{generate()} method recomputes the full attention matrix at every step.  For a 1\,024-context model with 12 layers, each generated token touches roughly 100 million multiply-adds worth of redundant key/value projections.  In this chapter we implement a \textbf{KV cache} that stores previously computed keys and values, reducing per-token cost from $O(T)$ to $O(1)$ in the attention computation.  We also cover nucleus (top-$p$) sampling.
+
+
+\section{The Autoregressive Bottleneck}
+
+Generating $N$ tokens requires $N$ forward passes.  In each pass, self-attention computes keys and values for \emph{all} positions in the sequence --- including positions that were already processed.
+
+Without a cache, generating token $t$ requires:
+\begin{itemize}
+  \item Computing Q, K, V for all $t$ positions: $O(t \cdot d^2)$
+  \item Attention matrix: $O(t^2 \cdot d)$
+\end{itemize}
+
+The K and V for positions $0$ through $t{-}1$ are identical to what was computed when generating token $t{-}1$.  Recomputing them is pure waste.
+
+
+\section{The KV Cache}
+
+The fix: cache K and V for all previous positions.  When generating token $t$:
+\begin{enumerate}
+  \item Compute Q, K, V for position $t$ only ($O(d^2)$).
+  \item Append K and V to the cache.
+  \item Attend using Q for position $t$ against \emph{cached} K, V for all $t$ positions ($O(t \cdot d)$).
+\end{enumerate}
+
+Memory cost per layer:
+\[
+  2 \times T_{\max} \times n_{\text{kv\_head}} \times d_{\text{head}} \times \text{dtype\_size}
+\]
+
+For our model ($T{=}1024$, 12 KV heads, $d{=}64$, bf16):
+\[
+  2 \times 1024 \times 12 \times 64 \times 2 = 3.1\,\text{MB per layer} \times 12 = 37.7\,\text{MB total}
+\]
+
+With GQA (4 KV heads instead of 12), this drops to 12.6\,MB --- small enough to be irrelevant.
+
+\subsection{Implementation}
+
+\filetag{microgpt/generate.py}
+\begin{lstlisting}
+class KVCache:
+    """Pre-allocated key/value cache for autoregressive generation.
+
+    For each layer, stores keys and values of all previously processed
+    tokens.  Shape per layer: (batch, max_seq_len, n_kv_head, head_dim).
+    """
+
+    def __init__(
+        self,
+        n_layers: int,
+        max_seq_len: int,
+        n_kv_head: int,
+        head_dim: int,
+        batch_size: int = 1,
+        dtype: torch.dtype = torch.bfloat16,
+        device: str = "cuda",
+    ) -> None:
+        self.n_layers = n_layers
+        self.max_seq_len = max_seq_len
+        self.pos = 0  # next write position
+
+        # Pre-allocate: (n_layers, 2, batch, max_seq_len, n_kv_head, head_dim)
+        # The '2' dimension is for K and V
+        self.cache = torch.zeros(
+            n_layers, 2, batch_size, max_seq_len, n_kv_head, head_dim,
+            dtype=dtype, device=device,
+        )
+
+    def update(
+        self,
+        layer_idx: int,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Write new K, V and return the full cached K, V.
+
+        k, v: (B, T_new, n_kv_head, head_dim) --- new tokens
+        Returns: (B, T_total, n_kv_head, head_dim) --- all cached tokens
+        """
+        T_new = k.size(1)
+        self.cache[layer_idx, 0, :, self.pos : self.pos + T_new] = k
+        self.cache[layer_idx, 1, :, self.pos : self.pos + T_new] = v
+        # Return everything up to and including the new tokens
+        end = self.pos + T_new
+        return (
+            self.cache[layer_idx, 0, :, :end],
+            self.cache[layer_idx, 1, :, :end],
+        )
+
+    def advance(self, n: int) -> None:
+        """Advance the write position by n tokens."""
+        self.pos += n
+\end{lstlisting}
+
+
+\section{Prefill and Decode Phases}
+
+Generation has two phases:
+
+\textbf{Prefill}: process the entire prompt at once.  This fills the KV cache for all prompt positions.  Attention is causal over the prompt length.
+
+\textbf{Decode}: generate one token at a time.  Each step computes Q for the new position only and attends against the full cached K, V.  Attention is not causal during decode (the single query can attend to all cached positions).
+
+\tip{The prefill phase can be batched and parallelized just like training --- it is compute-bound.  The decode phase is memory-bound because each step only processes one token but reads the full KV cache.  This is why KV cache size matters for inference throughput.}
+
+
+\section{Top-$p$ (Nucleus) Sampling}
+
+In addition to temperature and top-$k$ (covered in the BabyGPT tutorial), we implement \textbf{nucleus sampling} (Holtzman et al., 2020):
+
+\begin{enumerate}
+  \item Sort tokens by probability (descending).
+  \item Compute the cumulative probability.
+  \item Keep the smallest set of tokens whose cumulative probability $\geq p$.
+  \item Re-normalize and sample.
+\end{enumerate}
+
+Top-$p$ is adaptive: when the model is confident, it keeps few tokens; when uncertain, it keeps many.  Typical values: $p = 0.9$ or $p = 0.95$.
+
+\begin{lstlisting}[language=Python]
+if top_p is not None:
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+    cumprobs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+    remove_mask = cumprobs - F.softmax(sorted_logits, dim=-1) >= top_p
+    sorted_logits[remove_mask] = float("-inf")
+    logits = sorted_logits.scatter(1, sorted_indices, sorted_logits)
+\end{lstlisting}
+
+
+\section{Summary}
+
+Efficient inference requires:
+\begin{enumerate}
+  \item \textbf{KV cache}: store K, V for previously processed tokens; compute only Q for new tokens.
+  \item \textbf{Prefill + decode}: batch-process the prompt, then generate one token at a time.
+  \item \textbf{Sampling strategies}: temperature, top-$k$, and top-$p$ for controlling output diversity.
+\end{enumerate}
+
+The full generation script is in \code{microgpt/generate.py}, including a CLI for generating text from a trained checkpoint.

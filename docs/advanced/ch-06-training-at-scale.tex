@@ -1,0 +1,256 @@
+\chapter{Training at Scale}
+\label{ch:training}
+
+With distributed infrastructure in place, this chapter focuses on the training recipe: the optimizer, learning-rate schedule, batch-size selection, gradient clipping, and monitoring.  We assemble the complete training script, show how to checkpoint and resume, and provide a practical guide to launching runs on rented GPU clusters.
+
+
+\section{The AdamW Optimizer}
+
+We use AdamW (Loshchilov \& Hutter, 2019) with decoupled weight decay.  The key insight from BabyGPT carries over: separate parameters into two groups:
+
+\begin{itemize}
+  \item \textbf{Decay group}: all 2D+ parameters (weight matrices).  Apply weight decay $\lambda = 0.1$.
+  \item \textbf{No-decay group}: all 1D parameters (biases, LayerNorm/RMSNorm weights, embedding weights).  No weight decay.
+\end{itemize}
+
+Weight decay on norms and biases is harmful because these parameters control scale and shift, not capacity.
+
+We also enable the \code{fused=True} option for a faster CUDA kernel.
+
+
+\section{Learning Rate Schedule}
+
+\subsection{Warmup + cosine decay}
+
+Same structure as BabyGPT but different hyperparameters:
+
+\begin{enumerate}
+  \item \textbf{Linear warmup}: 0 to $\text{lr}_{\max}$ over 200 steps.  Prevents large early gradients from destabilizing training.
+  \item \textbf{Cosine decay}: $\text{lr}_{\max}$ to $\text{lr}_{\min}$ over the remaining steps.
+\end{enumerate}
+
+\[
+  \text{lr}(t) = \begin{cases}
+    \text{lr}_{\max} \cdot \frac{t+1}{\text{warmup}} & t < \text{warmup} \\[4pt]
+    \text{lr}_{\min} + \frac{\text{lr}_{\max} - \text{lr}_{\min}}{2}
+      \left(1 + \cos\!\left(\pi \cdot \frac{t - \text{warmup}}{T - \text{warmup}}\right)\right)
+    & t \geq \text{warmup}
+  \end{cases}
+\]
+
+Our hyperparameters: $\text{lr}_{\max} = 6 \times 10^{-4}$, $\text{lr}_{\min} = 6 \times 10^{-5}$, warmup = 200 steps.
+
+
+\section{Gradient Clipping}
+
+We clip the global gradient norm to 1.0:
+
+\begin{lstlisting}[language=Python]
+torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+\end{lstlisting}
+
+This prevents gradient explosions --- rare but catastrophic events where a single bad batch produces enormous gradients that destabilize training.
+
+
+\section{Training Monitoring}
+
+During training we track:
+\begin{itemize}
+  \item \textbf{Training loss}: averaged over gradient accumulation steps.
+  \item \textbf{Learning rate}: confirms the schedule is applied correctly.
+  \item \textbf{Tokens per second}: throughput metric.
+  \item \textbf{MFU (Model FLOPs Utilization)}: what fraction of theoretical peak FLOPs the GPUs are achieving.  40--50\% is typical for this model size.
+  \item \textbf{Validation loss}: computed every \code{EVAL\_INTERVAL} steps.
+\end{itemize}
+
+MFU is estimated as:
+\[
+  \text{MFU} = \frac{\text{tokens/sec} \times 6N}{P_{\text{peak}}}
+\]
+where $N$ is the parameter count and $P_{\text{peak}}$ is the GPU's theoretical peak FLOPs in bf16.
+
+
+\section{Checkpointing}
+
+Checkpoints save:
+\begin{itemize}
+  \item Model state dict (all parameters)
+  \item Optimizer state dict (momentum, variance for every parameter)
+  \item Current step and loss
+  \item Model config (so we can reconstruct the model architecture)
+\end{itemize}
+
+We save at regular intervals (\code{SAVE\_INTERVAL}) and whenever validation loss improves (\code{best.pt}).
+
+
+\section{The Complete Training Script}
+
+\filetag{microgpt/train.py}
+\begin{lstlisting}
+"""MicroGPT training script (single-GPU and multi-GPU via DDP).
+
+Usage:
+    # Single GPU
+    uv run python -m microgpt.train
+
+    # Multi-GPU (8 GPUs on one node)
+    uv run torchrun --nproc_per_node=8 -m microgpt.train
+
+    # Multi-node (see vast.ai guide in Chapter 6)
+    torchrun --nnodes=2 --nproc_per_node=8 --node_rank=$RANK \
+        --master_addr=$MASTER --master_port=29500 -m microgpt.train
+"""
+
+import math
+import os
+import time
+
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+from .config import GPTConfig
+from .model import MicroGPT
+from .tokenizer import BPETokenizer
+from .dataloader import create_dataloader
+from .distributed import ddp_init, ddp_cleanup, is_master, print0
+
+
+# ---------------------------------------------------------------------------
+# Training hyperparameters
+# ---------------------------------------------------------------------------
+
+# Model
+MODEL_CONFIG = GPTConfig()
+
+# Optimization
+MAX_STEPS = 20_000             # total training steps
+WARMUP_STEPS = 200             # linear LR warmup
+MAX_LR = 6e-4                  # peak learning rate
+MIN_LR = 6e-5                  # final learning rate (10% of peak)
+WEIGHT_DECAY = 0.1             # AdamW weight decay
+BETA1, BETA2 = 0.9, 0.95      # AdamW betas
+GRAD_CLIP = 1.0                # max gradient norm
+
+# Batch sizing
+DEVICE_BATCH_SIZE = 16         # micro-batch per GPU per accumulation step
+TOTAL_BATCH_TOKENS = 524_288   # ~0.5M tokens per optimizer step
+# grad_accum_steps is computed from these at runtime
+
+# Evaluation
+EVAL_INTERVAL = 500            # steps between evaluations
+EVAL_STEPS = 20                # batches per evaluation
+
+# Checkpointing
+CHECKPOINT_DIR = "microgpt_checkpoints"
+SAVE_INTERVAL = 2000           # steps between checkpoint saves
+
+# Tokenizer
+TOKENIZER_DIR = "tokenizer"
+\end{lstlisting}
+
+\filetag{microgpt/train.py}
+\begin{lstlisting}
+def get_lr(step: int) -> float:
+    """Cosine learning rate schedule with linear warmup.
+
+    1. Linear warmup from 0 to MAX_LR over WARMUP_STEPS.
+    2. Cosine decay from MAX_LR to MIN_LR over remaining steps.
+    """
+    if step < WARMUP_STEPS:
+        return MAX_LR * (step + 1) / WARMUP_STEPS
+    if step >= MAX_STEPS:
+        return MIN_LR
+    # Cosine decay
+    progress = (step - WARMUP_STEPS) / (MAX_STEPS - WARMUP_STEPS)
+    return MIN_LR + 0.5 * (MAX_LR - MIN_LR) * (1.0 + math.cos(math.pi * progress))
+\end{lstlisting}
+
+\filetag{microgpt/train.py}
+\begin{lstlisting}
+def configure_optimizer(model: nn.Module) -> torch.optim.AdamW:
+    """Configure AdamW with separate parameter groups for decay/no-decay.
+
+    Weight decay is applied to all 2D+ parameters (weight matrices).
+    Biases, norms, and embedding weights are not decayed.
+    """
+    decay_params = []
+    no_decay_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim < 2:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    groups = [
+        {"params": decay_params, "weight_decay": WEIGHT_DECAY},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
+
+    optimizer = torch.optim.AdamW(
+        groups,
+        lr=MAX_LR,
+        betas=(BETA1, BETA2),
+        fused=True,  # faster fused CUDA kernel
+    )
+    return optimizer
+\end{lstlisting}
+
+
+\section{Running on vast.ai}
+
+\textbf{vast.ai} is a GPU marketplace where you can rent 8$\times$H100 nodes by the hour.  Here is a minimal recipe:
+
+\begin{enumerate}
+  \item \textbf{Select an instance} with 8$\times$H100 (or A100) GPUs, Ubuntu, and PyTorch pre-installed.
+  \item \textbf{SSH in} and clone the repo:
+  \begin{lstlisting}[language=bash]
+git clone <your-repo-url> && cd learn-attn-docs
+  \end{lstlisting}
+  \item \textbf{Install deps}:
+  \begin{lstlisting}[language=bash]
+pip install uv && uv sync
+  \end{lstlisting}
+  \item \textbf{Download data}:
+  \begin{lstlisting}[language=bash]
+uv run python -m microgpt.dataset --num-shards 50
+  \end{lstlisting}
+  \item \textbf{Train a tokenizer} (or copy a pre-trained one):
+  \begin{lstlisting}[language=bash]
+# Extract text from first shard and train
+uv run python -m microgpt.tokenizer \
+    --input <text-file> --vocab-size 32768 --output tokenizer
+  \end{lstlisting}
+  \item \textbf{Launch training}:
+  \begin{lstlisting}[language=bash]
+uv run torchrun --nproc_per_node=8 -m microgpt.train
+  \end{lstlisting}
+\end{enumerate}
+
+\tip{Multi-node training (e.g., 2 nodes of 8 GPUs each) requires setting \code{-{}-nnodes}, \code{-{}-node\_rank}, \code{-{}-master\_addr}, and \code{-{}-master\_port} on each node.  The \code{NCCL} backend handles inter-node communication over InfiniBand or Ethernet.  For a GPT-2 scale model, a single 8-GPU node is sufficient.}
+
+
+\section{Summary}
+
+The complete training recipe:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Component & Setting \\
+\midrule
+Optimizer & AdamW ($\beta_1{=}0.9, \beta_2{=}0.95$, wd=0.1, fused) \\
+LR schedule & Warmup 200 steps $\to$ cosine decay \\
+Peak LR & $6 \times 10^{-4}$ \\
+Effective batch & $\sim$0.5M tokens/step \\
+Gradient clipping & Global norm 1.0 \\
+Precision & bf16 activations, fp32 master weights \\
+Compilation & \code{torch.compile} \\
+Checkpointing & Every 2000 steps + best val loss \\
+\bottomrule
+\end{tabular}
+\end{center}

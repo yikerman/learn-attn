@@ -1,0 +1,166 @@
+\chapter{Evaluation}
+\label{ch:eval}
+
+How do you know if your language model is any good?  In this chapter we cover \textbf{perplexity} and \textbf{bits per byte} (a tokenizer-independent metric), implement validation-loss tracking, and briefly survey zero-shot benchmarks and scaling laws.
+
+
+\section{Perplexity}
+
+Perplexity is the exponential of the average cross-entropy loss:
+\[
+  \text{PPL} = \exp\!\left(\frac{1}{N}\sum_{i=1}^{N} -\log p(x_i \mid x_{<i})\right) = e^{\,\mathcal{L}}
+\]
+
+Intuitively, perplexity measures how ``surprised'' the model is by the text.  A perplexity of 10 means the model is as uncertain as if it were choosing uniformly among 10 equally likely tokens at each position.
+
+\textbf{Lower is better.}  A random model over a 32K vocabulary has perplexity $\sim$32\,768.  GPT-2 124M typically achieves perplexity $\sim$25--30 on web text.
+
+\begin{lstlisting}[language=Python]
+def perplexity(loss: float) -> float:
+    import math
+    return math.exp(loss)
+\end{lstlisting}
+
+
+\section{Bits Per Byte (BPB)}
+
+Perplexity depends on the tokenizer: a model with a 50K vocabulary and a model with a 32K vocabulary are not directly comparable by perplexity because they predict over different token sets.
+
+\textbf{Bits per byte} normalizes by the number of raw bytes in the text, making it tokenizer-independent:
+\[
+  \text{BPB} = \frac{\sum_i \mathcal{L}(x_i)}{\text{total bytes}} \cdot \frac{1}{\ln 2}
+\]
+
+Each token contributes its cross-entropy loss, weighted by how many UTF-8 bytes it represents.  The $1/\ln 2$ converts from nats (natural log) to bits.
+
+BPB values for English text typically range from 0.8 (strong model) to 1.5 (weak model).  Random: $\sim$8 bits/byte.
+
+\filetag{microgpt/eval.py}
+\begin{lstlisting}
+@torch.no_grad()
+def compute_bpb(
+    model: MicroGPT,
+    val_loader,
+    tokenizer: BPETokenizer,
+    num_batches: int = 50,
+) -> float:
+    """Compute bits per byte (BPB) on validation data.
+
+    BPB is tokenizer-independent: it measures compression in terms of
+    raw bytes rather than tokens.  This allows fair comparison between
+    models with different tokenizers.
+
+    BPB = mean_cross_entropy / ln(2) * (tokens / bytes)
+    """
+    model.eval()
+    total_loss = 0.0
+    total_tokens = 0
+    total_bytes = 0
+
+    for i, (inputs, targets) in enumerate(val_loader):
+        if i >= num_batches:
+            break
+
+        logits, _ = model(inputs)
+        # Per-token cross-entropy
+        B, T, V = logits.shape
+        loss_per_token = F.cross_entropy(
+            logits.reshape(-1, V),
+            targets.reshape(-1),
+            reduction="none",
+        ).view(B, T)
+
+        # Count bytes per token
+        for b in range(B):
+            for t in range(T):
+                token_id = targets[b, t].item()
+                try:
+                    token_bytes = tokenizer.token_to_bytes(token_id)
+                    n_bytes = len(token_bytes)
+                except Exception:
+                    n_bytes = 1  # fallback for special tokens
+
+                total_loss += loss_per_token[b, t].item()
+                total_bytes += n_bytes
+                total_tokens += 1
+
+    # BPB = total_nats / total_bytes / ln(2)
+    import math
+    bpb = total_loss / max(total_bytes, 1) / math.log(2)
+    return bpb
+\end{lstlisting}
+
+
+\section{Validation Loss}
+
+During training, we compute validation loss every \code{EVAL\_INTERVAL} steps on a held-out shard (the last parquet file).  This is the most important metric for detecting:
+
+\begin{itemize}
+  \item \textbf{Overfitting}: val loss starts increasing while train loss continues decreasing.  Unlikely at this data scale but important to monitor.
+  \item \textbf{Training instability}: sudden spikes in val loss indicate exploding gradients or bad learning rate.
+  \item \textbf{Convergence}: val loss plateaus, indicating diminishing returns from further training.
+\end{itemize}
+
+
+\section{Zero-Shot Benchmarks}
+
+The GPT-2 paper's key claim was that language models can perform tasks zero-shot.  Standard benchmarks include:
+
+\begin{center}
+\begin{tabular}{lp{8cm}}
+\toprule
+Benchmark & What it tests \\
+\midrule
+\textbf{HellaSwag} & Commonsense reasoning: pick the most plausible continuation of a scenario. \\
+\textbf{LAMBADA} & Long-range prediction: predict the last word of a passage. \\
+\textbf{ARC} (AI2 Reasoning Challenge) & Science questions from grade-school exams. \\
+\textbf{WinoGrande} & Pronoun resolution requiring commonsense. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For zero-shot evaluation, the model is given each candidate answer and the one with the lowest perplexity (or highest log-probability) is selected.  No fine-tuning is performed.
+
+A well-trained GPT-2 124M typically achieves:
+\begin{itemize}
+  \item HellaSwag: $\sim$30--35\% accuracy (random baseline: 25\%)
+  \item LAMBADA: $\sim$40--50\% accuracy
+\end{itemize}
+
+
+\section{Scaling Laws}
+
+Kaplan et al.\ (2020) and Hoffmann et al.\ (2022, ``Chinchilla'') established that language model loss follows a power law in compute:
+\[
+  L(C) \approx L_0 + A \cdot C^{-\alpha}
+\]
+
+Key findings:
+\begin{itemize}
+  \item Loss decreases predictably with more compute (larger models, more data, longer training).
+  \item \textbf{Compute-optimal training}: for a fixed compute budget, there is an optimal ratio of model size to data size.  Chinchilla's ratio: $\sim$20 tokens per parameter.
+  \item For our 135M parameter model, compute-optimal training would use $\sim$2.7B tokens.  Training on 10B tokens is ``over-training'' by Chinchilla standards, but smaller models benefit from seeing more data.
+\end{itemize}
+
+\tip{Nanochat reports a CORE score (Composite Overall Reasoning Evaluation) that aggregates multiple benchmarks.  Their GPT-2 reproduction achieves a CORE score of $\sim$0.257, matching the original GPT-2 124M.  This provides a useful single-number target for verifying your training run.}
+
+
+\section{Summary}
+
+Evaluating a language model:
+\begin{enumerate}
+  \item \textbf{Validation loss}: primary training metric; detect overfitting and instability.
+  \item \textbf{Perplexity}: $e^{\text{loss}}$; intuitive but tokenizer-dependent.
+  \item \textbf{Bits per byte}: tokenizer-independent compression metric; enables cross-model comparison.
+  \item \textbf{Zero-shot benchmarks}: HellaSwag, LAMBADA, ARC test real capabilities.
+  \item \textbf{Scaling laws}: predict performance at larger scale; guide compute allocation.
+\end{enumerate}
+
+The evaluation script is in \code{microgpt/eval.py}, runnable as:
+
+\shelltag
+\begin{lstlisting}[language=bash]
+uv run python -m microgpt.eval \
+    --checkpoint microgpt_checkpoints/best.pt \
+    --tokenizer tokenizer
+\end{lstlisting}

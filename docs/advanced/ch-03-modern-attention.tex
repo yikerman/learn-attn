@@ -1,0 +1,552 @@
+\chapter{Modern Attention Techniques}
+\label{ch:modern-attn}
+
+The GPT-2 architecture we built in the previous chapter is a faithful reproduction of the 2019 paper.  Since then, several techniques have become standard practice in production language models.  Each one is a self-contained improvement: you can adopt them individually, and each has a clear paper trail.
+
+In this chapter we replace learned positional embeddings with \textbf{Rotary Position Embeddings} (RoPE), swap LayerNorm for \textbf{RMSNorm}, add \textbf{Grouped-Query Attention} (GQA), enable \textbf{Flash Attention} via PyTorch's SDPA, switch the FFN activation from GELU to $\mathrm{relu}^2$, and add \textbf{QK normalization}.
+
+All changes land in \code{microgpt/attention.py} (the new attention module) and an updated \code{microgpt/model.py}.
+
+
+\section{RMSNorm}
+
+\textbf{Paper:} Zhang \& Sennrich, ``Root Mean Square Layer Normalization'' (2019).
+
+LayerNorm normalizes by subtracting the mean and dividing by the standard deviation:
+\[
+  \text{LayerNorm}(x) = \gamma \cdot \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta
+\]
+
+RMSNorm drops the mean-centering step.  It normalizes by the root mean square only:
+\[
+  \text{RMSNorm}(x) = \gamma \cdot \frac{x}{\text{RMS}(x) + \epsilon}, \qquad
+  \text{RMS}(x) = \sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2}
+\]
+
+This is simpler (one fewer reduction op, no learnable bias $\beta$) and empirically works just as well.  LLaMA, Gemma, and most modern LLMs use RMSNorm.  PyTorch provides \code{F.rms\_norm} for an optimized implementation.
+
+\filetag{microgpt/model.py}
+\begin{lstlisting}
+class RMSNorm(nn.Module):
+    """Root Mean Square LayerNorm (Zhang & Sennrich, 2019).
+
+    RMSNorm(x) = x / RMS(x) * gamma
+    where RMS(x) = sqrt(mean(x^2) + eps)
+
+    Compared to LayerNorm, RMSNorm skips the mean-centering step.
+    This makes it simpler (fewer ops, no bias parameter) and empirically
+    works just as well.  Used by LLaMA, Gemma, and most modern LLMs.
+    """
+
+    def __init__(self, n_embd: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(n_embd))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.rms_norm(x, self.weight.shape, self.weight, self.eps)
+\end{lstlisting}
+
+
+\section{Rotary Position Embeddings (RoPE)}
+
+\textbf{Paper:} Su et al., ``RoFormer: Enhanced Transformer with Rotary Position Embedding'' (2021).
+
+\subsection{The problem with learned positional embeddings}
+
+BabyGPT and canonical GPT-2 add a learned position vector to each token:
+\[
+  x_t = \text{token\_emb}(t) + \text{pos\_emb}(t)
+\]
+
+This has two limitations:
+\begin{enumerate}
+  \item \textbf{Fixed maximum length.}  The position embedding table has \code{sequence\_len} rows.  The model cannot handle sequences longer than what it was trained on.
+  \item \textbf{Absolute positions.}  Position 5 always gets the same vector, regardless of context.  The model has no built-in notion of ``3 tokens apart.''
+\end{enumerate}
+
+\subsection{The RoPE idea}
+
+RoPE encodes position by \emph{rotating} query and key vectors in 2D subspaces.  Instead of adding a position vector, it multiplies by a rotation matrix.
+
+Given a head dimension $d$, pair up the dimensions into $d/2$ pairs.  Each pair $(x_{2i}, x_{2i+1})$ is a 2D vector.  At position $m$, rotate this pair by angle $m \cdot \theta_i$:
+
+\[
+\begin{pmatrix} y_{2i} \\ y_{2i+1} \end{pmatrix}
+=
+\begin{pmatrix}
+\cos(m\theta_i) & -\sin(m\theta_i) \\
+\sin(m\theta_i) & \phantom{-}\cos(m\theta_i)
+\end{pmatrix}
+\begin{pmatrix} x_{2i} \\ x_{2i+1} \end{pmatrix}
+\]
+
+where $\theta_i = 1 / 10000^{2i/d}$.
+
+The key insight: when computing $q_m^T k_n$ (the attention score between positions $m$ and $n$), the rotations combine as $\cos((m-n)\theta_i)$ --- the score depends only on the \emph{relative} distance $m - n$.  This gives the model relative position awareness with zero learned parameters.
+
+\subsection{Implementation}
+
+We precompute the $\cos$ and $\sin$ tables once and apply them in the attention forward pass.
+
+\filetag{microgpt/attention.py}
+\begin{lstlisting}
+"""Modern attention components: RoPE, GQA, QK-norm, Flash Attention.
+
+This module replaces the canonical GPT-2 attention (Chapter 2) with
+techniques that have become standard since 2019.  Each is a self-contained
+improvement with a clear paper trail.
+"""
+
+import math
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# ---------------------------------------------------------------------------
+# Rotary Position Embeddings (RoPE) --- Su et al. 2021
+# ---------------------------------------------------------------------------
+# Instead of adding a learned position vector to each token, RoPE encodes
+# relative position by *rotating* query and key vectors in 2D subspaces.
+#
+# Given a head-dim d, we pair up the dimensions into d/2 pairs.
+# Each pair (x_{2i}, x_{2i+1}) is treated as a 2D vector and rotated
+# by an angle theta_i * position, where theta_i = 1 / 10000^{2i/d}.
+#
+# The rotation matrix for pair i at position m is:
+#
+#   [ cos(m*theta_i)  -sin(m*theta_i) ]   [ x_{2i}   ]
+#   [ sin(m*theta_i)   cos(m*theta_i) ] * [ x_{2i+1} ]
+#
+# This means: attention between positions m and n depends only on the
+# *difference* (m - n), giving the model relative position awareness
+# without any learned parameters.
+
+
+def precompute_rope_frequencies(
+    head_dim: int,
+    max_seq_len: int,
+    theta: float = 10000.0,
+    device: torch.device | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Precompute cos/sin tables for RoPE.
+
+    Returns (cos, sin) each of shape (1, max_seq_len, 1, head_dim/2).
+    The singleton dims broadcast over batch and heads.
+    """
+    assert head_dim % 2 == 0
+    # theta_i = 1 / 10000^{2i/d} for i = 0, 1, ..., d/2 - 1
+    half = head_dim // 2
+    freqs = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
+    # positions: 0, 1, ..., max_seq_len - 1
+    positions = torch.arange(max_seq_len, device=device).float()
+    # outer product: (max_seq_len, head_dim/2)
+    angles = torch.outer(positions, freqs)
+    # Shape: (1, max_seq_len, 1, d/2) --- broadcasts over (B, T, H, D/2)
+    cos = torch.cos(angles).unsqueeze(0).unsqueeze(2)  # (1, max_seq_len, 1, d/2)
+    sin = torch.sin(angles).unsqueeze(0).unsqueeze(2)
+    return cos, sin
+\end{lstlisting}
+
+The application function splits each head into two halves and rotates:
+
+\filetag{microgpt/attention.py}
+\begin{lstlisting}
+def apply_rotary_emb(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """Apply RoPE rotation to x.
+
+    x: (B, T, H, D)  where D = head_dim
+    cos, sin: (1, T, 1, D/2)  --- precomputed tables
+    """
+    d = x.shape[-1] // 2
+    x1, x2 = x[..., :d], x[..., d:]
+    # Rotation: [x1, x2] -> [x1*cos + x2*sin, -x1*sin + x2*cos]
+    # Wait --- the standard rotation is [x1*cos - x2*sin, x1*sin + x2*cos].
+    # The nanochat convention (which we follow) swaps the sign pattern.
+    # Both are valid --- they just rotate in opposite directions.
+    y1 = x1 * cos + x2 * sin
+    y2 = x1 * (-sin) + x2 * cos
+    return torch.cat([y1, y2], dim=-1)
+\end{lstlisting}
+
+\tip{There are two common implementations of RoPE.  The ``split'' version (used here and by nanochat) puts the first $d/2$ dims in one group and the second $d/2$ in another.  The ``interleaved'' version (used by LLaMA) pairs up even and odd indices.  Both produce the same rotary behavior --- the dot product between rotated $q$ and $k$ depends on relative position regardless of which pairing you use.}
+
+
+\section{Grouped-Query Attention (GQA)}
+
+\textbf{Paper:} Ainslie et al., ``GQA: Training Generalized Multi-Query Transformers from Multi-Head Checkpoints'' (2023).
+
+Standard multi-head attention (MHA) gives each head its own Q, K, and V projections.  With 12 heads, that means 12 independent sets of K and V matrices.
+
+GQA reduces the number of K/V heads while keeping the full number of Q heads.  Groups of query heads share one K/V head:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Method & Q heads & KV heads & KV memory \\
+\midrule
+MHA & 12 & 12 & 1x \\
+GQA (4 KV) & 12 & 4 & 0.33x \\
+MQA & 12 & 1 & 0.08x \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The main benefit is \textbf{inference efficiency}: the KV cache (Chapter 7) shrinks proportionally to the number of KV heads.  With GQA-4 instead of MHA, the KV cache is 3x smaller, enabling longer sequences or larger batch sizes.
+
+In the implementation, we project K and V to fewer dimensions, then expand them to match Q during the attention computation:
+
+\filetag{microgpt/attention.py}
+\begin{lstlisting}
+class CausalSelfAttention(nn.Module):
+    """Modern causal self-attention.
+
+    Improvements over the canonical GPT-2 attention:
+    - RoPE instead of learned positional embeddings
+    - Grouped-Query Attention (GQA): n_kv_head <= n_head
+    - QK normalization for training stability
+    - PyTorch SDPA (Flash Attention / memory-efficient backend)
+    """
+
+    def __init__(
+        self,
+        n_embd: int,
+        n_head: int,
+        n_kv_head: int,
+        bias: bool = False,
+    ) -> None:
+        super().__init__()
+        assert n_embd % n_head == 0
+        assert n_head % n_kv_head == 0
+
+        self.n_head = n_head
+        self.n_kv_head = n_kv_head
+        self.head_dim = n_embd // n_head
+        self.n_kv_groups = n_head // n_kv_head  # queries per KV head
+
+        # Q projects to full n_head * head_dim; K and V project to n_kv_head * head_dim
+        self.W_Q = nn.Linear(n_embd, n_head * self.head_dim, bias=bias)
+        self.W_K = nn.Linear(n_embd, n_kv_head * self.head_dim, bias=bias)
+        self.W_V = nn.Linear(n_embd, n_kv_head * self.head_dim, bias=bias)
+        self.c_proj = nn.Linear(n_embd, n_embd, bias=bias)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        B, T, C = x.shape
+
+        # Project to Q, K, V
+        # Q: (B, T, n_head, head_dim)
+        # K, V: (B, T, n_kv_head, head_dim)
+        q = self.W_Q(x).view(B, T, self.n_head, self.head_dim)
+        k = self.W_K(x).view(B, T, self.n_kv_head, self.head_dim)
+        v = self.W_V(x).view(B, T, self.n_kv_head, self.head_dim)
+
+        # Apply RoPE to queries and keys
+        # cos/sin are (1, max_seq_len, 1, D/2); slice to (1, T, 1, D/2)
+        q = apply_rotary_emb(q, cos[:, :T], sin[:, :T])
+        k = apply_rotary_emb(k, cos[:, :T], sin[:, :T])
+
+        # QK normalization: normalize Q and K after RoPE
+        # Prevents attention logits from growing with depth.
+        q = F.rms_norm(q, (self.head_dim,))
+        k = F.rms_norm(k, (self.head_dim,))
+
+        # Transpose to (B, H, T, D) for SDPA
+        q = q.transpose(1, 2)  # (B, n_head, T, head_dim)
+        k = k.transpose(1, 2)  # (B, n_kv_head, T, head_dim)
+        v = v.transpose(1, 2)  # (B, n_kv_head, T, head_dim)
+
+        # GQA: expand K and V heads to match Q heads
+        # Each group of (n_head / n_kv_head) query heads shares one KV head.
+        if self.n_kv_groups > 1:
+            k = k.unsqueeze(2).expand(-1, -1, self.n_kv_groups, -1, -1)
+            k = k.reshape(B, self.n_head, T, self.head_dim)
+            v = v.unsqueeze(2).expand(-1, -1, self.n_kv_groups, -1, -1)
+            v = v.reshape(B, self.n_head, T, self.head_dim)
+
+        # Flash Attention via SDPA (automatically selects the best backend)
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+        # Reassemble heads: (B, n_head, T, head_dim) -> (B, T, n_embd)
+        out = out.transpose(1, 2).contiguous().view(B, T, C)
+        return self.c_proj(out)
+\end{lstlisting}
+
+
+\section{QK Normalization}
+
+\textbf{Papers:} Henry et al. (2020); Dehghani et al. (2023).
+
+In deep transformers, attention logits ($q \cdot k / \sqrt{d}$) can grow large because the norms of $q$ and $k$ are unbounded.  Large logits push softmax toward a one-hot distribution, choking gradient flow.
+
+QK normalization applies RMSNorm to queries and keys after projection (and after RoPE in our case).  This bounds the logit magnitude, stabilizing training without changing the attention mechanism.
+
+The implementation is two lines in the attention forward method:
+\begin{lstlisting}[language=Python]
+q = F.rms_norm(q, (self.head_dim,))
+k = F.rms_norm(k, (self.head_dim,))
+\end{lstlisting}
+
+
+\section{Flash Attention}
+
+\textbf{Paper:} Dao et al., ``FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness'' (2022).
+
+Standard attention materializes the full $T \times T$ attention matrix, requiring $O(T^2)$ memory.  Flash Attention computes the \emph{same} result using a tiled algorithm that never materializes the full matrix, reducing memory from $O(T^2)$ to $O(T)$ and running 2-4x faster through better GPU memory hierarchy utilization.
+
+We do not implement Flash Attention ourselves.  PyTorch's \code{F.scaled\_dot\_product\_attention} (SDPA) automatically dispatches to the best available backend:
+\begin{itemize}
+  \item \textbf{FlashAttention v2} on Ampere+ GPUs (A100, RTX 3090, etc.)
+  \item \textbf{Memory-efficient attention} (xformers) as fallback
+  \item \textbf{Math-mode} (naive) as a last resort
+\end{itemize}
+
+The one-line call replaces our entire manual attention computation (scale, mask, softmax, dropout, matmul):
+\begin{lstlisting}[language=Python]
+out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+\end{lstlisting}
+
+\tip{If you are running on an H100 or newer GPU, you can install FlashAttention 3 (\code{flash-attn}) for even faster attention.  Nanochat uses FA3 when available and falls back to SDPA otherwise.  For this tutorial, SDPA is sufficient and works everywhere.}
+
+
+\section{relu-squared Activation}
+
+\textbf{Paper:} So et al., ``Primer: Searching for Efficient Transformers for Language Modeling'' (2021).
+
+The GPT-2 FFN uses GELU:
+\[
+  \text{FFN}(x) = W_2 \cdot \text{GELU}(W_1 x)
+\]
+
+We replace GELU with $\text{relu}^2$:
+\[
+  \text{FFN}(x) = W_2 \cdot \text{relu}(W_1 x)^2
+\]
+
+Why?
+\begin{itemize}
+  \item \textbf{Sparsity.}  ReLU zeros out negative activations.  Squaring keeps them zero but amplifies positive activations, producing a naturally sparse hidden representation.
+  \item \textbf{Simplicity.}  No special function --- just \code{F.relu(x).square()}.
+  \item \textbf{Performance.}  Empirically competitive with GELU at GPT-2 scale.
+\end{itemize}
+
+\filetag{microgpt/model.py}
+\begin{lstlisting}
+class FeedForward(nn.Module):
+    """Position-wise FFN with relu-squared activation (So et al., 2021).
+
+    FFN(x) = W2 * relu(W1 * x)^2
+
+    relu-squared is computationally simpler than GELU and produces sparse
+    activations (many exact zeros plus a few strongly positive values).
+    Empirically competitive with GELU at GPT-2 scale and above.
+    """
+
+    def __init__(self, config: GPTConfig) -> None:
+        super().__init__()
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.c_fc(x)
+        x = F.relu(x).square()  # relu^2
+        x = self.c_proj(x)
+        return x
+\end{lstlisting}
+
+
+\section{Putting It All Together}
+
+Here is the updated model.  Compared to Chapter 2's canonical GPT-2:
+\begin{itemize}
+  \item \code{LayerNorm} $\to$ \code{RMSNorm}
+  \item Learned \code{wpe} $\to$ RoPE (no position embedding table)
+  \item Standard MHA $\to$ GQA with QK-norm and SDPA
+  \item GELU $\to$ relu-squared
+  \item Added \code{embed\_norm}: RMSNorm after token embedding (stabilizes early training)
+\end{itemize}
+
+\filetag{microgpt/model.py}
+\begin{lstlisting}
+class TransformerBlock(nn.Module):
+    """Pre-norm transformer block with modern components.
+
+    x = x + Attention(RMSNorm(x))
+    x = x + FFN(RMSNorm(x))
+    """
+
+    def __init__(self, config: GPTConfig) -> None:
+        super().__init__()
+        self.ln_1 = RMSNorm(config.n_embd)
+        self.attn = CausalSelfAttention(
+            n_embd=config.n_embd,
+            n_head=config.n_head,
+            n_kv_head=config.n_kv_head,
+            bias=config.bias,
+        )
+        self.ln_2 = RMSNorm(config.n_embd)
+        self.ffn = FeedForward(config)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        x = x + self.attn(self.ln_1(x), cos, sin)
+        x = x + self.ffn(self.ln_2(x))
+        return x
+\end{lstlisting}
+
+\filetag{microgpt/model.py}
+\begin{lstlisting}
+class MicroGPT(nn.Module):
+    """Decoder-only transformer language model (GPT-2 scale, modern arch).
+
+    Key differences from the canonical GPT-2 (Chapter 2):
+    - RMSNorm instead of LayerNorm
+    - RoPE instead of learned positional embeddings (no wpe)
+    - GQA support (n_kv_head can be < n_head)
+    - QK normalization inside attention
+    - relu-squared activation instead of GELU
+    - Flash Attention via SDPA
+    """
+
+    def __init__(self, config: GPTConfig) -> None:
+        super().__init__()
+        self.config = config
+
+        # Pad vocab to nearest multiple of 64 for tensor-core efficiency
+        padded_vocab = ((config.vocab_size + 63) // 64) * 64
+
+        self.transformer = nn.ModuleDict(dict(
+            wte=nn.Embedding(padded_vocab, config.n_embd),
+            blocks=nn.ModuleList(
+                [TransformerBlock(config) for _ in range(config.n_layer)]
+            ),
+            ln_f=RMSNorm(config.n_embd),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, padded_vocab, bias=False)
+
+        # No positional embedding table --- RoPE handles positions
+        # Precompute RoPE cos/sin tables
+        head_dim = config.n_embd // config.n_head
+        cos, sin = precompute_rope_frequencies(
+            head_dim, config.sequence_len, device=None,
+        )
+        self.register_buffer("rope_cos", cos)
+        self.register_buffer("rope_sin", sin)
+
+        # RMSNorm after token embedding (stabilizes early training)
+        self.embed_norm = RMSNorm(config.n_embd)
+
+        # Initialize weights
+        self.apply(self._init_weights)
+        # Scaled init for residual projections
+        for name, p in self.named_parameters():
+            if name.endswith("c_proj.weight"):
+                nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
+
+    def _init_weights(self, module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        targets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        B, T = tokens.shape
+        assert T <= self.config.sequence_len
+
+        # Token embeddings only --- no positional embeddings (RoPE handles this)
+        x = self.transformer.wte(tokens)
+        x = self.embed_norm(x)
+
+        # Pass cos/sin through the blocks for RoPE
+        cos = self.rope_cos.to(x.dtype)
+        sin = self.rope_sin.to(x.dtype)
+
+        for block in self.transformer.blocks:
+            x = block(x, cos, sin)
+
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
+        # Crop logits to actual vocab_size (remove padding tokens)
+        logits = logits[..., :self.config.vocab_size]
+
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                targets.reshape(-1),
+            )
+        return logits, loss
+\end{lstlisting}
+
+The \code{generate()} method is unchanged from Chapter 2 --- Chapter 7 will upgrade it with a KV cache.
+
+\checkpoint{Verify the modernized model:}
+
+\shelltag
+\begin{lstlisting}[language=bash]
+uv run python -c "
+from microgpt.config import GPTConfig
+from microgpt.model import MicroGPT
+import torch
+# MHA (default): 12 query heads, 12 KV heads
+model = MicroGPT(GPTConfig())
+print(f'MHA params: {model.count_parameters():,}')
+# GQA: 12 query heads, 4 KV heads
+model_gqa = MicroGPT(GPTConfig(n_kv_head=4))
+print(f'GQA params: {model_gqa.count_parameters():,}')
+x = torch.randint(0, 32768, (2, 64))
+logits, loss = model(x[:, :-1], x[:, 1:])
+print(f'Forward OK: loss {loss.item():.4f}')
+"
+\end{lstlisting}
+
+\outputtag
+\begin{lstlisting}[language={}]
+MHA params: 135,286,272
+GQA params: 125,849,088
+Forward OK: loss 10.59
+\end{lstlisting}
+
+GQA with 4 KV heads saves about 10M parameters (the K and V projections shrink from $768 \times 768$ to $768 \times 256$ per block).  The bigger win comes at inference when the KV cache is 3x smaller.
+
+\tip{Nanochat includes several more experimental techniques beyond what we cover here: value embeddings (ResFormer-style), per-layer residual scaling lambdas, smear gates, and the Muon optimizer.  These are active areas of research with less established paper trails.  We teach the techniques that have become industry-standard (RoPE, RMSNorm, GQA, Flash Attention) and leave the experimental ones as pointers for further reading.}
+
+
+\section{Summary}
+
+We upgraded every major component of the GPT-2 architecture:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Component & Canonical GPT-2 & MicroGPT (modern) \\
+\midrule
+Normalization & LayerNorm & RMSNorm \\
+Position encoding & Learned embeddings & RoPE \\
+Attention & Standard MHA & GQA + QK-norm + SDPA \\
+FFN activation & GELU & relu-squared \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each change is well-motivated, well-documented in the literature, and independently beneficial.  The model is now ready for large-scale training --- which requires a data pipeline (next chapter) and distributed computing infrastructure (Chapter 5).

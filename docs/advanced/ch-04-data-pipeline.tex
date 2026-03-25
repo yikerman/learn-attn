@@ -1,0 +1,367 @@
+\chapter{Data Pipeline}
+\label{ch:data}
+
+BabyGPT trains on a single 1\,MB text file that fits in RAM.  GPT-2 was trained on WebText, a 40\,GB corpus of web pages.  Modern reproductions use even larger, openly available datasets like FineWeb-Edu.  In this chapter we build a data pipeline that downloads shards in Parquet format, tokenizes documents with BOS prepended, packs them efficiently into fixed-length sequences using best-fit bin packing, and distributes batches across multiple GPUs.
+
+
+\section{Web-Scale Datasets}
+
+The original GPT-2 was trained on \textbf{WebText}, a custom dataset of web pages filtered by Reddit upvotes (links with $\geq 3$ karma).  WebText was never publicly released.  Several open alternatives now exist:
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+Dataset & Size & Description \\
+\midrule
+The Pile & 800 GB & 22 diverse sources (academic, books, code, web) \\
+C4 & 750 GB & Cleaned Common Crawl \\
+FineWeb & 15 TB & Cleaned Common Crawl (2013--2024) \\
+FineWeb-Edu & 1.3 TB & FineWeb filtered for educational content \\
+ClimbMix & 400B tokens & Nanochat's curated multi-source blend \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+We use \textbf{FineWeb-Edu}: it is openly available on HuggingFace, well-documented, and filtered for quality.  For a GPT-2 scale reproduction ($\sim$10B tokens), we download a small subset (10--50 shards, each $\sim$100M tokens).
+
+
+\section{The Parquet Format}
+
+FineWeb-Edu is distributed as Apache Parquet files.  Parquet is a columnar storage format designed for large-scale data:
+
+\begin{itemize}
+  \item \textbf{Columnar}: data is stored column-by-column, so reading just the \code{text} column skips all metadata columns.
+  \item \textbf{Compressed}: Snappy or Zstandard compression reduces file sizes by 2--5x.
+  \item \textbf{Row groups}: each file is divided into row groups (typically 10K--100K rows each).  You can read one row group at a time without loading the entire file.
+\end{itemize}
+
+The \code{pyarrow} library provides fast Parquet reading in Python.
+
+
+\section{Dataset Management}
+
+The \code{microgpt/dataset.py} module handles downloading and listing parquet shards:
+
+\filetag{microgpt/dataset.py}
+\begin{lstlisting}
+"""Dataset management: download and list FineWeb-Edu parquet shards.
+
+FineWeb-Edu is an open, high-quality web text dataset filtered for
+educational content.  It is distributed as parquet files on HuggingFace.
+Each file contains a 'text' column with document strings.
+
+Usage:
+    python -m microgpt.dataset                  # download 10 shards (~5 GB)
+    python -m microgpt.dataset --num-shards 50  # download more for full training
+"""
+
+import os
+import glob
+
+import requests
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "microgpt")
+
+# FineWeb-Edu-score-2 sample: ~10B tokens total, split into 100 parquet files
+# Each shard is ~50-100 MB, containing ~100M tokens
+BASE_URL = (
+    "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu-score-2"
+    "/resolve/main/data/CC-MAIN-2024-10"
+)
+# Shard filenames: train-00000-of-00099.parquet ... train-00098-of-00099.parquet
+NUM_SHARDS_AVAILABLE = 99
+
+
+def shard_filename(idx: int) -> str:
+    return f"train-{idx:05d}-of-{NUM_SHARDS_AVAILABLE:05d}.parquet"
+
+
+def shard_path(idx: int) -> str:
+    return os.path.join(DATA_DIR, shard_filename(idx))
+
+
+# ---------------------------------------------------------------------------
+# Download
+# ---------------------------------------------------------------------------
+
+def download_shard(idx: int) -> None:
+    """Download a single parquet shard if not already present."""
+    path = shard_path(idx)
+    if os.path.exists(path):
+        return
+    url = f"{BASE_URL}/{shard_filename(idx)}"
+    print(f"  Downloading shard {idx}: {url}")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    response = requests.get(url, stream=True, timeout=60)
+    response.raise_for_status()
+    # Write to a temp file first, then rename (atomic on POSIX)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
+            f.write(chunk)
+    os.rename(tmp_path, path)
+
+
+def download_shards(num_shards: int = 10) -> None:
+    """Download parquet shards for training."""
+    num_shards = min(num_shards, NUM_SHARDS_AVAILABLE)
+    print(f"Downloading {num_shards} FineWeb-Edu shards to {DATA_DIR}")
+    for idx in range(num_shards):
+        download_shard(idx)
+    print(f"Done. {num_shards} shards in {DATA_DIR}")
+
+
+# ---------------------------------------------------------------------------
+# Listing
+# ---------------------------------------------------------------------------
+
+def list_parquet_files() -> list[str]:
+    """Return sorted list of all downloaded parquet shard paths."""
+    pattern = os.path.join(DATA_DIR, "train-*.parquet")
+    paths = sorted(glob.glob(pattern))
+    return paths
+\end{lstlisting}
+
+\checkpoint{Download two shards and verify:}
+
+\shelltag
+\begin{lstlisting}[language=bash]
+uv run python -m microgpt.dataset --num-shards 2
+\end{lstlisting}
+
+
+\section{BOS-Aligned Best-Fit Packing}
+
+\subsection{The packing problem}
+
+Documents have variable lengths.  Training requires fixed-length sequences of $T+1$ tokens (input + shifted target).  How do we fill each row?
+
+\textbf{Naive concatenation} glues documents end-to-end and chops the result into $T$-length chunks.  This is simple and wastes nothing, but a model token at position 500 might attend back to a BOS token at position 200 that belongs to a completely different document.  The attention is wasted on irrelevant context.
+
+\textbf{BOS-aligned packing} ensures every row starts with a BOS token and that each token can attend back to its own document's beginning.  The tradeoff: documents that don't fit a row are cropped, wasting $\sim$35\% of tokens.
+
+\subsection{The best-fit algorithm}
+
+For each row in the batch:
+\begin{enumerate}
+  \item Maintain a buffer of tokenized documents.
+  \item Find the \textbf{largest} document that fits entirely in the remaining space.  Append it to the row.  Repeat.
+  \item When no document fits, \textbf{crop} the shortest document in the buffer to fill the remaining space exactly.
+\end{enumerate}
+
+This achieves 100\% utilization (no padding) while minimizing the amount of cropped text by preferring documents that fit without cropping.
+
+
+\section{The Distributed Dataloader}
+
+\filetag{microgpt/dataloader.py}
+\begin{lstlisting}
+"""Distributed dataloader with BOS-aligned best-fit packing.
+
+This dataloader:
+1. Reads documents from parquet shards (via dataset.py)
+2. Tokenizes them with BOS prepended
+3. Packs documents into fixed-length rows using best-fit bin packing
+4. Distributes shards across DDP ranks
+5. Pre-allocates pinned CPU buffers for efficient GPU transfer
+
+Every row starts with a BOS token, so the model always sees the beginning
+of at least one document.  Documents that don't fit are cropped (the cropped
+portion is discarded, not carried over).  This wastes ~35% of tokens but
+ensures every token can attend back to its document's BOS.
+"""
+
+import torch
+import pyarrow.parquet as pq
+
+from .dataset import list_parquet_files
+
+
+# ---------------------------------------------------------------------------
+# Document iterator (with DDP sharding)
+# ---------------------------------------------------------------------------
+
+def _document_batches(
+    split: str,
+    rank: int = 0,
+    world_size: int = 1,
+    batch_size: int = 128,
+):
+    """Infinite iterator over batches of document strings from parquet files.
+
+    DDP sharding: each rank reads every world_size-th row group, so ranks
+    see disjoint data without any communication.
+
+    Yields: (text_batch, shard_idx)
+    """
+    paths = list_parquet_files()
+    assert paths, "No parquet files found. Run: python -m microgpt.dataset"
+    # Last shard is validation, rest are training
+    if split == "train":
+        paths = paths[:-1]
+    else:
+        paths = paths[-1:]
+
+    while True:  # infinite iteration (multi-epoch)
+        for shard_idx, filepath in enumerate(paths):
+            pf = pq.ParquetFile(filepath)
+            # Each rank reads every world_size-th row group
+            rg_idx = rank
+            while rg_idx < pf.num_row_groups:
+                rg = pf.read_row_group(rg_idx)
+                texts = rg.column("text").to_pylist()
+                for i in range(0, len(texts), batch_size):
+                    yield texts[i : i + batch_size], shard_idx
+                rg_idx += world_size
+\end{lstlisting}
+
+DDP sharding is simple: each rank reads every $N$\textsuperscript{th} row group (where $N$ is the world size).  Rank 0 reads row groups 0, $N$, $2N$, \ldots; rank 1 reads 1, $N+1$, $2N+1$, \ldots.  No communication is needed --- each rank sees disjoint data.
+
+\filetag{microgpt/dataloader.py}
+\begin{lstlisting}
+def _pack_row(
+    doc_buffer: list[list[int]],
+    row: torch.Tensor,
+    row_capacity: int,
+) -> None:
+    """Pack documents from doc_buffer into a single row using best-fit.
+
+    Algorithm:
+    1. Find the largest document that fits entirely in the remaining space.
+    2. Append it and repeat.
+    3. When no document fits, crop the shortest one to fill exactly.
+
+    This achieves 100% utilization (no padding) at the cost of ~35% cropped
+    tokens.
+    """
+    pos = 0
+    while pos < row_capacity:
+        remaining = row_capacity - pos
+
+        # Find largest doc that fits entirely
+        best_idx = -1
+        best_len = 0
+        for i, doc in enumerate(doc_buffer):
+            doc_len = len(doc)
+            if doc_len <= remaining and doc_len > best_len:
+                best_idx = i
+                best_len = doc_len
+
+        if best_idx >= 0:
+            doc = doc_buffer.pop(best_idx)
+            row[pos : pos + len(doc)] = torch.tensor(doc, dtype=torch.long)
+            pos += len(doc)
+        else:
+            # No doc fits --- crop shortest to fill remaining space exactly
+            shortest_idx = min(
+                range(len(doc_buffer)), key=lambda i: len(doc_buffer[i])
+            )
+            doc = doc_buffer.pop(shortest_idx)
+            row[pos : pos + remaining] = torch.tensor(
+                doc[:remaining], dtype=torch.long
+            )
+            pos += remaining
+\end{lstlisting}
+
+\filetag{microgpt/dataloader.py}
+\begin{lstlisting}
+def create_dataloader(
+    tokenizer,
+    batch_size: int,
+    sequence_len: int,
+    split: str = "train",
+    rank: int = 0,
+    world_size: int = 1,
+    device: str = "cuda",
+    buffer_size: int = 1000,
+):
+    """Create an infinite dataloader that yields (inputs, targets) batches.
+
+    Args:
+        tokenizer: BPETokenizer instance (needs .encode_with_bos and .bos_id)
+        batch_size: number of rows per batch (per GPU)
+        sequence_len: context length (T)
+        split: "train" or "val"
+        rank: DDP rank (0 for single-GPU)
+        world_size: DDP world size (1 for single-GPU)
+        device: target device ("cuda" or "cpu")
+        buffer_size: min documents in buffer before packing
+
+    Yields:
+        (inputs, targets): both shape (batch_size, sequence_len), on device
+    """
+    row_capacity = sequence_len + 1  # +1 because targets are shifted by 1
+    batches = _document_batches(split, rank, world_size)
+    doc_buffer: list[list[int]] = []
+
+    # Pre-allocate buffers for efficient transfer
+    use_cuda = device == "cuda"
+    row_buffer = torch.empty(
+        (batch_size, row_capacity), dtype=torch.long
+    )
+    cpu_buffer = torch.empty(
+        2 * batch_size * sequence_len, dtype=torch.long, pin_memory=use_cuda
+    )
+    gpu_buffer = torch.empty(
+        2 * batch_size * sequence_len, dtype=torch.long, device=device
+    )
+    # Views into the flat buffers
+    cpu_inputs = cpu_buffer[: batch_size * sequence_len].view(
+        batch_size, sequence_len
+    )
+    cpu_targets = cpu_buffer[batch_size * sequence_len :].view(
+        batch_size, sequence_len
+    )
+    inputs = gpu_buffer[: batch_size * sequence_len].view(
+        batch_size, sequence_len
+    )
+    targets = gpu_buffer[batch_size * sequence_len :].view(
+        batch_size, sequence_len
+    )
+
+    while True:
+        # Build a full batch
+        for row_idx in range(batch_size):
+            # Refill buffer if needed
+            while len(doc_buffer) < buffer_size:
+                text_batch, _ = next(batches)
+                for text in text_batch:
+                    doc_ids = tokenizer.encode_with_bos(text)
+                    doc_buffer.append(doc_ids)
+
+            _pack_row(doc_buffer, row_buffer[row_idx], row_capacity)
+
+        # Split into inputs and targets (shifted by 1)
+        cpu_inputs.copy_(row_buffer[:, :-1])
+        cpu_targets.copy_(row_buffer[:, 1:])
+
+        # Single host-to-device transfer
+        gpu_buffer.copy_(cpu_buffer, non_blocking=use_cuda)
+        yield inputs, targets
+\end{lstlisting}
+
+\subsection{Buffer management}
+
+The dataloader maintains a \textbf{document buffer} of at least \code{buffer\_size} tokenized documents.  When the buffer runs low, it reads the next batch of raw text from parquet, tokenizes it (prepending BOS), and appends the token lists to the buffer.
+
+Pre-allocated pinned CPU buffers and a single host-to-device copy per batch minimize transfer overhead.
+
+\tip{Why is the row capacity $T+1$ instead of $T$?  Because the training targets are the inputs shifted by one position.  A row of $T+1$ tokens gives $T$ (input, target) pairs: input = row[0:T], target = row[1:T+1].  This is the same teacher-forcing setup as BabyGPT, just with more careful buffer management.}
+
+
+\section{Summary}
+
+The data pipeline has three components:
+
+\begin{enumerate}
+  \item \textbf{Dataset manager} (\code{microgpt/dataset.py}): downloads parquet shards from HuggingFace and lists them.
+  \item \textbf{Document iterator}: reads row groups from parquet files, sharded across DDP ranks, with infinite looping.
+  \item \textbf{BOS-aligned dataloader} (\code{microgpt/dataloader.py}): tokenizes documents, packs them into fixed-length rows using best-fit bin packing, and transfers batches to GPU.
+\end{enumerate}
+
+With the data pipeline in place, the next chapter sets up the distributed training infrastructure (DDP, mixed precision, gradient accumulation) needed to actually train on this data.

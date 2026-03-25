@@ -1,0 +1,31 @@
+\input{preamble-advanced}
+\begin{document}
+
+\begin{titlepage}
+\centering
+\vspace*{4cm}
+{\Huge\bfseries Building GPT-2 from Scratch\par}
+\vspace{1.5cm}
+{\Large An eight-chapter guide to training a real language model\par}
+\vspace{2cm}
+{\large Based on ``Attention Is All You Need'' (Vaswani et al., 2017),\\
+``Language Models are Unsupervised Multitask Learners'' (Radford et al., 2019),\\
+and Karpathy's nanochat\par}
+\vfill
+\end{titlepage}
+
+\tableofcontents
+
+\include{ch-01-bpe-tokenization}
+\include{ch-02-scaling-up}
+\include{ch-03-modern-attention}
+\include{ch-04-data-pipeline}
+\include{ch-05-distributed-training}
+\include{ch-06-training-at-scale}
+\include{ch-07-efficient-inference}
+\include{ch-08-evaluation}
+
+\appendix
+\include{appendix-hardware}
+
+\end{document}

@@ -1,0 +1,166 @@
+\chapter{Distributed Training}
+\label{ch:distributed}
+
+Training 135 million parameters on billions of tokens takes thousands of GPU-hours.  A single GPU can do it, but an 8-GPU node cuts wall-clock time by nearly $8\times$.  In this chapter we introduce PyTorch's \textbf{Distributed Data Parallel} (DDP), set up multi-GPU training with \code{torchrun}, implement gradient accumulation for large effective batch sizes, and adopt mixed-precision arithmetic to double throughput.
+
+
+\section{Why Distributed?}
+
+A rough estimate of the compute required to train GPT-2 124M:
+\[
+  C \approx 6 \cdot N \cdot D
+\]
+where $N$ is the parameter count and $D$ is the number of training tokens.  For $N = 135$M and $D = 10$B tokens:
+\[
+  C \approx 6 \times 135\text{M} \times 10\text{B} = 8.1 \times 10^{18} \text{ FLOPs}
+\]
+
+An A100 GPU delivers $\sim$312 TFLOPS in bf16.  At 40\% utilization (a realistic MFU):
+\begin{itemize}
+  \item 1 GPU: $\sim$65 hours
+  \item 8 GPUs: $\sim$8 hours
+\end{itemize}
+
+The factor-of-2 comes from memory-bound operations and communication overhead, but $8\times$ GPU scaling is nearly linear for DDP at this model size.
+
+
+\section{Data Parallelism (DDP)}
+
+DDP is the simplest form of distributed training.  Each GPU has a \textbf{complete copy} of the model.  Each processes a different batch of data.  After the backward pass, gradients are \textbf{averaged} across all GPUs using an all-reduce operation:
+
+\begin{enumerate}
+  \item Each rank computes $\nabla L_i$ on its local batch.
+  \item All-reduce: $\bar{\nabla L} = \frac{1}{W} \sum_{i=0}^{W-1} \nabla L_i$ (NCCL handles this).
+  \item Each rank updates its model with $\bar{\nabla L}$.
+\end{enumerate}
+
+Since every rank starts with the same weights and applies the same averaged gradient, the models stay in sync.  DDP is mathematically equivalent to training on a single GPU with a $W\times$ larger batch.
+
+\subsection{Process groups and ranks}
+
+\code{torchrun} sets three environment variables:
+\begin{itemize}
+  \item \code{RANK}: global rank (0 to $W-1$).
+  \item \code{LOCAL\_RANK}: rank within the current node (0 to GPUs-per-node $- 1$).
+  \item \code{WORLD\_SIZE}: total number of GPUs ($W$).
+\end{itemize}
+
+Our \code{distributed.py} reads these and initializes the NCCL process group:
+
+\filetag{microgpt/distributed.py}
+\begin{lstlisting}
+"""Distributed training utilities for DDP.
+
+This module provides helpers for setting up and tearing down PyTorch
+Distributed Data Parallel (DDP) training with NCCL backend.
+
+Usage:
+    rank, local_rank, world_size = ddp_init()
+    # ... training loop ...
+    ddp_cleanup()
+"""
+
+import os
+
+import torch
+import torch.distributed as dist
+
+
+def ddp_init() -> tuple[int, int, int]:
+    """Initialize DDP and return (rank, local_rank, world_size).
+
+    Reads RANK, LOCAL_RANK, WORLD_SIZE from environment (set by torchrun).
+    If these are not set, assumes single-GPU mode.
+    """
+    if "RANK" not in os.environ:
+        # Single-GPU mode
+        return 0, 0, 1
+
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+
+    dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(local_rank)
+
+    return rank, local_rank, world_size
+
+
+def ddp_cleanup() -> None:
+    """Destroy the DDP process group if it exists."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def is_master(rank: int) -> bool:
+    """Return True if this is the master process (rank 0)."""
+    return rank == 0
+
+
+def print0(*args, **kwargs) -> None:
+    """Print only on rank 0 (or when not using DDP)."""
+    if "RANK" not in os.environ or int(os.environ["RANK"]) == 0:
+        print(*args, **kwargs)
+\end{lstlisting}
+
+
+\section{Gradient Accumulation}
+
+Sometimes the effective batch size we want ($B_{\text{eff}}$) is larger than what fits in GPU memory.  Gradient accumulation splits each optimizer step into multiple forward-backward passes (micro-steps), accumulating gradients before stepping:
+
+\[
+  B_{\text{eff}} = B_{\text{device}} \times W \times A
+\]
+
+where $B_{\text{device}}$ is the per-GPU micro-batch, $W$ is the world size, and $A$ is the number of accumulation steps.
+
+In practice, we set a target in tokens:
+\begin{lstlisting}[language=Python]
+TOTAL_BATCH_TOKENS = 524_288   # ~0.5M tokens per optimizer step
+tokens_per_step = DEVICE_BATCH_SIZE * sequence_len
+grad_accum_steps = TOTAL_BATCH_TOKENS // (tokens_per_step * world_size)
+\end{lstlisting}
+
+During accumulation, we skip DDP gradient synchronization on all micro-steps except the last (using \code{model.no\_sync()}).  This avoids unnecessary all-reduce overhead.
+
+
+\section{Mixed Precision Training}
+
+Modern GPUs have specialized tensor cores that compute matrix multiplications in reduced precision (bf16 or fp16) at 2x the throughput of fp32.
+
+\textbf{BFloat16} is preferred over float16 because it has the same exponent range as fp32 (8 exponent bits), eliminating the need for a gradient scaler.  Training is simple:
+
+\begin{lstlisting}[language=Python]
+with torch.amp.autocast(device_type, dtype=torch.bfloat16):
+    _, loss = model(inputs, targets)
+    loss = loss / grad_accum_steps
+loss.backward()
+\end{lstlisting}
+
+Weights remain in fp32 (the ``master weights'') for optimizer precision.  Only activations and matmuls run in bf16.
+
+\tip{Nanochat goes further: it defines a custom \code{Linear} class that casts weights to bf16 in the forward pass, keeping master weights in fp32 without using \code{autocast}.  This is slightly more explicit but achieves the same result.  We use \code{autocast} for simplicity.}
+
+
+\section{torch.compile}
+
+PyTorch 2.0 introduced \code{torch.compile}, which fuses operations, eliminates Python overhead, and generates optimized GPU kernels:
+
+\begin{lstlisting}[language=Python]
+model = torch.compile(model)
+\end{lstlisting}
+
+This single line typically gives 10--30\% speedup.  The first iteration is slow (compilation), but subsequent iterations are faster.
+
+
+\section{Summary}
+
+The distributed training infrastructure consists of:
+\begin{enumerate}
+  \item \textbf{DDP}: each GPU holds a full model copy; gradients are all-reduced.
+  \item \textbf{Gradient accumulation}: large effective batch sizes without more memory.
+  \item \textbf{Mixed precision}: bf16 activations for 2x throughput, fp32 master weights.
+  \item \textbf{torch.compile}: fused kernels for 10--30\% speedup.
+\end{enumerate}
+
+In the next chapter we assemble the complete training script and cover the optimizer, LR schedule, monitoring, and deployment on rented GPU clusters.

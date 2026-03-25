@@ -1,0 +1,182 @@
+\chapter{Hardware Requirements}
+\label{app:hardware}
+
+This appendix provides concrete hardware requirements and recommendations for
+training and running MicroGPT.  All estimates assume the default configuration:
+135M parameters, 1\,024 context length, 32K vocabulary, bf16 mixed precision.
+
+
+\section{Memory Breakdown}
+
+The GPU memory footprint has four components:
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+Component & Size & Notes \\
+\midrule
+Model weights (fp32 master) & 0.54 GB & $135\text{M} \times 4$ bytes \\
+AdamW optimizer states ($m$, $v$) & 1.08 GB & $2 \times 135\text{M} \times 4$ bytes \\
+Gradients (fp32) & 0.54 GB & $135\text{M} \times 4$ bytes \\
+Activations (bf16, batch=16) & $\sim$6 GB & Scales with batch size \\
+\midrule
+\textbf{Total (training, batch=16)} & $\sim$\textbf{8.2 GB} & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Activations dominate and scale linearly with batch size.  Reducing
+\code{DEVICE\_BATCH\_SIZE} from 16 to 8 cuts activation memory roughly in half;
+gradient accumulation compensates to maintain the same effective batch size.
+
+For \textbf{inference only}, the footprint is much smaller --- the model in bf16
+plus the KV cache:
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+Component & Size & Notes \\
+\midrule
+Model weights (bf16) & 0.27 GB & $135\text{M} \times 2$ bytes \\
+KV cache (12 layers, bf16) & 0.04 GB & $12 \times 2 \times 1024 \times 12 \times 64 \times 2$ bytes \\
+\midrule
+\textbf{Total (inference)} & $\sim$\textbf{0.3 GB} & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+\section{Dataset Storage}
+
+FineWeb-Edu shards are compressed Parquet files hosted on HuggingFace:
+
+\begin{center}
+\begin{tabular}{rrrl}
+\toprule
+Shards & Disk & $\sim$Tokens & Use case \\
+\midrule
+2 & $\sim$150 MB & $\sim$200M & Smoke test / debugging \\
+10 (default) & $\sim$700 MB & $\sim$1B & Quick experiment \\
+50 & $\sim$3.5 GB & $\sim$5B & Solid training run \\
+99 (all) & $\sim$7 GB & $\sim$10B & Full reproduction \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The last shard is reserved for validation.  For the default 20K-step run at
+0.5M tokens/step ($\sim$10B tokens total), download all 99 shards.  With fewer
+shards the dataloader loops (multi-epoch), which still works but may overfit.
+
+Checkpoint storage is modest: each checkpoint is $\sim$1.1 GB (model + optimizer
+state in fp32).
+
+
+\section{Training: GPU Recommendations}
+
+Training time depends on GPU throughput.  The estimates below assume 40\%
+Model FLOPs Utilization (MFU), which is realistic for this model size with
+\code{torch.compile} and bf16:
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+GPU & VRAM & bf16 TFLOPS & 1-GPU time & 8-GPU time \\
+\midrule
+RTX 3080       & 10 GB & 30  & $\sim$200 h  & $\sim$25 h \\
+RTX 3090       & 24 GB & 36  & $\sim$166 h  & $\sim$21 h \\
+RTX 4090       & 24 GB & 83  & $\sim$72 h   & $\sim$9 h \\
+A100 (40/80 GB) & 40--80 GB & 312 & $\sim$19 h   & $\sim$2.4 h \\
+H100 SXM       & 80 GB & 990 & $\sim$6 h    & $\sim$45 min \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Minimum}
+
+A \textbf{single GPU with 10 GB VRAM} (e.g.\ RTX 3080) can train MicroGPT.
+Reduce \code{DEVICE\_BATCH\_SIZE} to 4--8 to fit in memory; gradient accumulation
+will maintain the effective batch size.  Training will take roughly a week.
+
+\subsection{Recommended}
+
+\begin{itemize}
+  \item \textbf{Budget option}: 1$\times$ RTX 4090 on vast.ai ($\sim$\$0.40/hr).
+    Finishes in $\sim$3 days, total cost $\sim$\$35.
+  \item \textbf{Sweet spot}: 1$\times$ A100 80\,GB ($\sim$\$1.50/hr).  Comfortable
+    VRAM headroom, finishes in under a day, $\sim$\$30.
+  \item \textbf{Fast iteration}: 8$\times$ H100 node ($\sim$\$25/hr on vast.ai).
+    Under an hour for a full run, $\sim$\$25.  Matches nanochat's reported
+    training time for GPT-2 reproduction.
+\end{itemize}
+
+\subsection{Batch size adjustments}
+
+If you hit out-of-memory errors, reduce \code{DEVICE\_BATCH\_SIZE} in
+\code{microgpt/train.py}.  The gradient accumulation logic automatically
+increases \code{grad\_accum\_steps} to compensate:
+
+\[
+  A = \left\lfloor \frac{B_{\text{total\_tokens}}}{B_{\text{device}} \times T \times W} \right\rfloor
+\]
+
+\begin{center}
+\begin{tabular}{rrrl}
+\toprule
+\code{DEVICE\_BATCH\_SIZE} & Peak VRAM & Accum steps (1 GPU) & Notes \\
+\midrule
+16 & $\sim$8.2 GB & 32 & Default \\
+8 & $\sim$5.1 GB & 64 & Fits on 8 GB GPUs \\
+4 & $\sim$3.6 GB & 128 & Fits on 6 GB GPUs \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Smaller micro-batches increase the number of accumulation steps per optimizer
+step, which is slightly slower (more kernel launches) but mathematically
+equivalent.
+
+
+\section{Inference and Evaluation}
+
+Inference (text generation) and evaluation (computing validation loss / BPB)
+have much lower requirements than training:
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+Task & Min VRAM & Notes \\
+\midrule
+Text generation (batch=1) & $\sim$0.5 GB & Model (bf16) + KV cache \\
+Evaluation (\code{microgpt.eval}, batch=8) & $\sim$3 GB & No optimizer states \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Any modern GPU with 2+ GB VRAM} can run inference.  This includes
+laptop GPUs (e.g.\ RTX 3050 Mobile with 4 GB).  CPU-only inference also works
+but is $\sim$50$\times$ slower.
+
+For evaluation, a single GPU with 4+ GB VRAM is sufficient.  Reduce
+\code{-{}-batch-size} if needed.
+
+\tip{If you trained on a multi-GPU cluster but want to evaluate on a single
+consumer GPU, just load the checkpoint --- the model weights are the same
+regardless of how many GPUs were used for training.  DDP only affects
+gradient averaging, not the final model.}
+
+
+\section{Summary}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Task & Minimum & Recommended \\
+\midrule
+Training & 1$\times$ GPU, 10 GB VRAM & 1$\times$ A100 80\,GB or 8$\times$ H100 \\
+Inference & Any GPU, 2 GB VRAM & Any GPU, 4+ GB VRAM \\
+Evaluation & 1$\times$ GPU, 4 GB VRAM & 1$\times$ GPU, 8+ GB VRAM \\
+Disk (dataset) & 150 MB (2 shards) & 7 GB (all 99 shards) \\
+Disk (checkpoints) & 1.1 GB & 5+ GB (multiple saves) \\
+\bottomrule
+\end{tabular}
+\end{center}

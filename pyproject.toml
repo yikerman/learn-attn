@@ -1,11 +1,15 @@
 [project]
 name = "learn-attn"
 version = "0.1.0"
-description = "Baby GPT from scratch — an educational transformer implementation"
+description = "GPT from scratch — educational transformer implementations (BabyGPT + MicroGPT)"
 requires-python = ">=3.14"
 dependencies = [
     "torch",
     "numpy",
+    "tiktoken",
+    "regex",
+    "pyarrow",
+    "requests",
 ]
 
 [[tool.uv.index]]
